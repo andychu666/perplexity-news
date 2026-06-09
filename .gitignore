@@ -1,0 +1,4 @@
+node_modules/
+perplexity-news-*.html
+*.log
+.DS_Store
