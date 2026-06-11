@@ -27,10 +27,23 @@ Output: `~/Downloads/perplexity-news-YYYY-MM-DD.html`
 
 ## Cron Setup
 
+### Simple daily digest (midnight UTC)
+
 ```bash
-# Every morning at 8:00 AM
-0 8 * * * node ~/.pi/agent/skills/perplexity-news/scripts/daily-news.js >> ~/Downloads/perplexity-news.log 2>&1
+0 0 * * * TZ=UTC node ~/.pi/agent/skills/perplexity-news/scripts/daily-news.js --out ~/Downloads/daily-news >> ~/Downloads/perplexity-news.log 2>&1
 ```
+
+### Morning + Night editions (midnight & noon UTC)
+
+```bash
+# Morning edition (00:00 UTC)
+0 0 * * * TZ=UTC node ~/.pi/agent/skills/perplexity-news/scripts/daily-news.js --out ~/Downloads/daily-news --suffix morning >> ~/Downloads/perplexity-news.log 2>&1
+
+# Night edition (12:00 UTC)
+0 12 * * * TZ=UTC node ~/.pi/agent/skills/perplexity-news/scripts/daily-news.js --out ~/Downloads/daily-news --suffix night >> ~/Downloads/perplexity-news.log 2>&1
+```
+
+Produces `perplexity-news-YYYY-MM-DD-morning.html` and `perplexity-news-YYYY-MM-DD-night.html`.
 
 ## Options
 
@@ -39,6 +52,7 @@ Output: `~/Downloads/perplexity-news-YYYY-MM-DD.html`
 | `--out <dir>` | `~/Downloads` | Output directory |
 | `--limit <N>` | `10` | Cards per category |
 | `--open` | — | Open the HTML file after generation (xdg-open) |
+| `--suffix <str>` | `""` | Append a label to the filename, e.g. `--suffix morning` → `perplexity-news-2026-06-11-morning.html` |
 
 ## Category URLs Scraped
 

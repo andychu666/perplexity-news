@@ -32,7 +32,7 @@ const CATEGORIES = [
 
 // ── CLI ─────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const opts = { out: path.join(os.homedir(), "Downloads"), limit: 10, open: false };
+  const opts = { out: path.join(os.homedir(), "Downloads"), limit: 10, open: false, suffix: "" };
   for (let i = 0; i < argv.length; i++) {
     switch (argv[i]) {
       case "--out":
@@ -45,6 +45,10 @@ function parseArgs(argv) {
         break;
       case "--open":
         opts.open = true;
+        break;
+      case "--suffix":
+        if (i + 1 >= argv.length) { console.error("ERROR: --suffix requires a string"); process.exit(1); }
+        opts.suffix = argv[++i];
         break;
       default:
         console.error("Unknown flag:", argv[i]);
@@ -324,7 +328,8 @@ async function main() {
   }
 
   const html = buildHtml(allData, opts.limit);
-  const outPath = path.join(opts.out, `perplexity-news-${today}.html`);
+  const suffixPart = opts.suffix ? `-${opts.suffix}` : "";
+  const outPath = path.join(opts.out, `perplexity-news-${today}${suffixPart}.html`);
   fs.mkdirSync(opts.out, { recursive: true });
   fs.writeFileSync(outPath, html);
 
