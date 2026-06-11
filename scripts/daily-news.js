@@ -68,14 +68,31 @@ function scrapeCategory(cat) {
   const url = `https://www.perplexity.ai/discover/${cat.id}`;
   log(`Scraping ${cat.name} (${url})`);
 
-  // Navigate
-  execSync(`"${NAV}" "${url}" 2>&1`, { timeout: 15000, stdio: "pipe" });
-  // Wait for React client-render + card hydration
-  execSync("sleep 4");
-
   // Extraction JS — must use the category's own URL path to select cards.
   // Technology (tech) and default (/discover) use /discover/you/ for story links.
   const catPath = (cat.id === "technology") ? "/discover/you/" : `/discover/${cat.id}/`;
+
+  // Navigate
+  execSync(`"${NAV}" "${url}" 2>&1`, { timeout: 15000, stdio: "pipe" });
+
+  // Poll for card hydration instead of a fixed sleep — Perplexity is a React
+  // SPA and hydration time varies (slow network / busy Chrome). Without this,
+  // categories can intermittently return 0 cards (as happened in the night run).
+  const countJS = `document.querySelectorAll('a[href*="${catPath}"]').length`;
+  const safeCountJS = countJS.replace(/'/g, "'\\''");
+  const MAX_WAIT_MS = 20000;
+  const POLL_MS = 1500;
+  let waited = 2000;
+  execSync("sleep 2");
+  while (waited < MAX_WAIT_MS) {
+    let n = 0;
+    try {
+      n = parseInt(execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: 15000, encoding: "utf8" }).trim(), 10) || 0;
+    } catch {}
+    if (n > 0) break;
+    execSync(`sleep ${POLL_MS / 1000}`);
+    waited += POLL_MS;
+  }
   const extractJS = `
 (function() {
   var catPath = "${catPath}";
