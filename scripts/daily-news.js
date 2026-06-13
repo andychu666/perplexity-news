@@ -8,7 +8,7 @@
  * Usage: node daily-news.js [--out ~/Downloads] [--limit 10] [--open]
  */
 
-const { execSync } = require("child_process");
+const { execSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -326,6 +326,77 @@ ${sections}
 </html>`;
 }
 
+// ── Chrome lifecycle ───────────────────────────────────────────────────
+function ensureChrome() {
+  // Already running?
+  try {
+    execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
+    return;
+  } catch { /* not running */ }
+
+  // Find Chrome binary
+  const candidates = [
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/snap/bin/chromium",
+  ];
+  let chromeBin = null;
+  for (const c of candidates) {
+    try {
+      execSync(`test -x "${c}"`);
+      chromeBin = c;
+      break;
+    } catch { /* not found */ }
+  }
+  if (!chromeBin) {
+    log("ERROR: No Chrome/Chromium binary found. Tried: " + candidates.join(", "));
+    process.exit(1);
+  }
+
+  const userDataDir = path.join(os.homedir(), ".cache", "browser-tools");
+  fs.mkdirSync(userDataDir, { recursive: true });
+
+  // Kill any stale lock files that prevent Chrome from starting
+  for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
+    try { fs.unlinkSync(path.join(userDataDir, lock)); } catch (e) {
+      if (e.code !== "ENOENT") log(`Warning: cannot remove ${lock} \u2014 ${e.message}`);
+    }
+  }
+
+  log(`Starting Chrome (${chromeBin})...`);
+  const child = spawn(chromeBin, [
+    "--remote-debugging-port=9222",
+    `--user-data-dir=${userDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--headless=new",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+  ], { detached: true, stdio: "ignore" });
+  child.unref();
+  let firstError = null;
+  for (let i = 0; i < 60; i++) {
+    try {
+      execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
+      log("Chrome ready on :9222");
+      return;
+    } catch (e) {
+      firstError ??= e;
+    }
+    // Log first error after a few attempts (not immediate — Chrome may be starting)
+    if (i === 12 && firstError) {
+      log(`Chrome not ready after 6s — last curl error: ${firstError.message || firstError.stderr || firstError}`);
+    }
+    execSync("sleep 0.5");
+  }
+
+  log("ERROR: Chrome failed to start within 30 seconds");
+  process.exit(1);
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -335,13 +406,8 @@ async function main() {
   log(`Output dir: ${opts.out}`);
   log(`Cards per category: ${opts.limit}`);
 
-  // Check Chrome
-  try {
-    execSync("curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1");
-  } catch {
-    log("ERROR: Chrome not reachable on :9222. Start with browser-start.js");
-    process.exit(1);
-  }
+  // Ensure Chrome is running with remote debugging
+  ensureChrome();
 
   const allData = {};
   for (const cat of CATEGORIES) {
