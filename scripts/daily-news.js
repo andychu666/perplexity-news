@@ -330,7 +330,7 @@ ${sections}
 function ensureChrome() {
   // Already running?
   try {
-    execSync("curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1");
+    execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
     return;
   } catch { /* not running */ }
 
@@ -360,7 +360,9 @@ function ensureChrome() {
 
   // Kill any stale lock files that prevent Chrome from starting
   for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
-    try { fs.unlinkSync(path.join(userDataDir, lock)); } catch {}
+    try { fs.unlinkSync(path.join(userDataDir, lock)); } catch (e) {
+      if (e.code !== "ENOENT") log(`Warning: cannot remove ${lock} \u2014 ${e.message}`);
+    }
   }
 
   log(`Starting Chrome (${chromeBin})...`);
@@ -375,14 +377,19 @@ function ensureChrome() {
     "--no-sandbox",
   ], { detached: true, stdio: "ignore" });
   child.unref();
-
-  // Wait for Chrome to become ready (up to 30 seconds)
+  let firstError = null;
   for (let i = 0; i < 60; i++) {
     try {
-      execSync("curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1");
+      execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
       log("Chrome ready on :9222");
       return;
-    } catch { /* still waiting */ }
+    } catch (e) {
+      firstError ??= e;
+    }
+    // Log first error after a few attempts (not immediate — Chrome may be starting)
+    if (i === 12 && firstError) {
+      log(`Chrome not ready after 6s — last curl error: ${firstError.message || firstError.stderr || firstError}`);
+    }
     execSync("sleep 0.5");
   }
 
