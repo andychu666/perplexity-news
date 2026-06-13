@@ -29,7 +29,7 @@ const HYDRATION_MAX_WAIT_MS = 20000;    // wall-clock ceiling for hydration
 
 const CATEGORIES = [
   { id: "top", name: "Top", emoji: "🌍" },
-  { id: "technology", name: "Tech & Science", emoji: "🔬" },
+  { id: "tech", name: "Tech & Science", emoji: "🔬" },
   { id: "finance", name: "Business", emoji: "💼" },
   { id: "arts", name: "Arts & Culture", emoji: "🎨" },
   { id: "sports", name: "Sports", emoji: "⚽" },
@@ -75,10 +75,10 @@ function scrapeCategory(cat) {
   log(`Scraping ${cat.name} (${url})`);
 
   // Extraction JS — must use the category's own URL path to select cards.
-  // Technology (tech) and default (/discover) use /discover/you/ for story links.
-  const catPath = (cat.id === "technology") ? "/discover/you/" : `/discover/${cat.id}/`;
-
+  // Story links follow /discover/{category-id}/slug pattern for all categories
   // Navigate
+  const catPath = `/discover/${cat.id}/`;
+
   execSync(`"${NAV}" "${url}" 2>&1`, { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
 
   // Poll for card hydration instead of a fixed sleep — Perplexity is a React
@@ -409,15 +409,28 @@ async function main() {
   // Ensure Chrome is running with remote debugging
   ensureChrome();
 
+  const RETRY_DELAY_MS = 5000;
+  const RETRY_MAX = 2;
   const allData = {};
   for (const cat of CATEGORIES) {
-    try {
-      allData[cat.id] = scrapeCategory(cat);
-      log(`  ${cat.name}: ${allData[cat.id].count} cards`);
-    } catch (e) {
-      log(`  ${cat.name}: ERROR — ${e.message}`);
-      allData[cat.id] = { count: 0, cards: [] };
+    let result = { count: 0, cards: [] };
+    let attempts = 0;
+    for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
+      if (attempt > 0) {
+        log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
+        execSync(`sleep ${RETRY_DELAY_MS / 1000}`);
+      }
+      attempts++;
+      try {
+        result = scrapeCategory(cat);
+      } catch (e) {
+        log(`  ${cat.name}: ERROR — ${e.message}`);
+      }
+      if (result.count > 0) break;
+      if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
     }
+    allData[cat.id] = result;
+    log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
   }
 
   const totalCards = CATEGORIES.reduce((sum, c) => sum + (allData[c.id]?.count || 0), 0);
