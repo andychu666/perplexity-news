@@ -75,10 +75,10 @@ function scrapeCategory(cat) {
   log(`Scraping ${cat.name} (${url})`);
 
   // Extraction JS — must use the category's own URL path to select cards.
-  // Technology (tech) and default (/discover) use /discover/you/ for story links.
   // Story links follow /discover/{category-id}/slug pattern for all categories
-  const catPath = `/discover/${cat.id}/`;
   // Navigate
+  const catPath = `/discover/${cat.id}/`;
+
   execSync(`"${NAV}" "${url}" 2>&1`, { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
 
   // Poll for card hydration instead of a fixed sleep — Perplexity is a React
