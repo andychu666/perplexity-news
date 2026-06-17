@@ -69,6 +69,50 @@ function log(msg) {
   process.stderr.write("[news] " + msg + "\n");
 }
 
+function sleepSync(ms) {
+  execSync(`sleep ${ms / 1000}`);
+}
+
+function waitForHydratedCards({
+  categoryName,
+  evaluateCount,
+  sleep = sleepSync,
+  now = Date.now,
+  logFn = log,
+  initialWaitMs = HYDRATION_INITIAL_WAIT_MS,
+  pollMs = HYDRATION_POLL_MS,
+  maxWaitMs = HYDRATION_MAX_WAIT_MS,
+}) {
+  const deadline = now() + maxWaitMs;
+
+  sleep(initialWaitMs);
+
+  let cardCount = 0;
+  let pollErrors = 0;
+
+  while (now() < deadline) {
+    try {
+      cardCount = parseInt(String(evaluateCount()).trim(), 10) || 0;
+    } catch (e) {
+      pollErrors++;
+      cardCount = 0;
+      if (pollErrors === 1) {
+        logFn(`  ${categoryName}: hydration poll eval failed — ${e.message}`);
+      }
+    }
+
+    if (cardCount > 0) break;
+    if (now() + pollMs >= deadline) break;
+    sleep(pollMs);
+  }
+
+  if (cardCount === 0) {
+    logFn(`  ${categoryName}: no cards after ${maxWaitMs / 1000}s hydration wait (${pollErrors} poll error(s)) — extracting anyway`);
+  }
+
+  return { cardCount, pollErrors };
+}
+
 // ── Scrape one category ─────────────────────────────────────────────
 function scrapeCategory(cat) {
   const url = `https://www.perplexity.ai/discover/${cat.id}`;
@@ -86,31 +130,10 @@ function scrapeCategory(cat) {
   // categories can intermittently return 0 cards (as happened in the night run).
   const countJS = `document.querySelectorAll('a[href*="${catPath}"]').length`;
   const safeCountJS = countJS.replace(/'/g, "'\\''");
-  // Wall-clock-bounded poll: track real elapsed time (Date.now), not just the
-  // sum of sleep intervals. EVAL calls can themselves take up to their timeout,
-  // so accumulating POLL_MS alone would let total wait far exceed MAX_WAIT_MS.
-  const deadline = Date.now() + HYDRATION_MAX_WAIT_MS;
-  execSync(`sleep ${HYDRATION_INITIAL_WAIT_MS / 1000}`);
-  let cardCount = 0;
-  let pollErrors = 0;
-  while (Date.now() < deadline) {
-    try {
-      cardCount = parseInt(
-        execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }).trim(),
-        10
-      ) || 0;
-    } catch (e) {
-      pollErrors++;
-      cardCount = 0;
-      if (pollErrors === 1) log(`  ${cat.name}: hydration poll eval failed — ${e.message}`);
-    }
-    if (cardCount > 0) break;
-    if (Date.now() + HYDRATION_POLL_MS >= deadline) break;
-    execSync(`sleep ${HYDRATION_POLL_MS / 1000}`);
-  }
-  if (cardCount === 0) {
-    log(`  ${cat.name}: no cards after ${HYDRATION_MAX_WAIT_MS / 1000}s hydration wait (${pollErrors} poll error(s)) — extracting anyway`);
-  }
+  waitForHydratedCards({
+    categoryName: cat.name,
+    evaluateCount: () => execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
+  });
   const extractJS = `
 (function() {
   var catPath = "${catPath}";
@@ -456,7 +479,13 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  log(`FATAL: ${err.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    log(`FATAL: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  waitForHydratedCards,
+};
