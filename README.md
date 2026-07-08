@@ -101,8 +101,6 @@ perplexity-news/
 ├── test/
 │   └── hydration-poll.test.js     # Unit tests for hydration polling
 ├── follow-ups/                    # Code review follow-up notes
-├── .github/
-│   └── CONTRIBUTING.md            # Contribution guidelines
 ├── package.json                   # npm test entrypoint
 ├── README.md                      # This file
 └── LICENSE                        # MIT
