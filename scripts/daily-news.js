@@ -115,7 +115,7 @@ function scrapeCategory(cat) {
 (function() {
   var catPath = "${catPath}";
   var cards = Array.from(document.querySelectorAll('a[href*="' + catPath + '"]')).map(function(a) {
-    var fullText = a.textContent.trim();
+    var fullText = a.innerText.trim();
     if (fullText.length < 20) return null;
     var href = a.getAttribute("href");
     if (href.startsWith("/")) href = "https://www.perplexity.ai" + href;
@@ -125,13 +125,13 @@ function scrapeCategory(cat) {
     var sourcesMatch = fullText.match(/(\\d+)\\s*sources?/i);
     var sources = sourcesMatch ? sourcesMatch[1] : null;
 
-    var publishedMatch = fullText.match(/Published\\s*\\n*\\s*([\\d]+\\s*(?:hours?|minutes?|days?)\\s*ago)/i);
+    var publishedMatch = fullText.match(/Published\s*\n*\s*([\d]+\s*(?:hours?|minutes?|days?)\s*ago|[A-Za-z]{3}\s+\d{1,2},\s*\d{4})/i);
     var published = publishedMatch ? publishedMatch[1] : null;
 
     var headline = fullText;
     var pubIdx = headline.indexOf("Published");
     if (pubIdx > 0) headline = headline.substring(0, pubIdx).trim();
-    if (sources) headline = headline.replace(new RegExp("\\\\d+\\\\s*sources?$", "i"), "").trim();
+    if (sources) headline = headline.replace(/\d+\s*sources?$/m, "").trim();
 
     return { headline: headline, href: href, imgSrc: imgSrc, published: published, sources: sources };
   }).filter(function(c) { return c !== null; });
