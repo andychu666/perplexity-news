@@ -114,6 +114,12 @@ perplexity-news/
 | `--open` | — | Open HTML after generation |
 | `--suffix <str>` | `""` | Append label to filename, e.g. `--suffix morning` |
 
+## ✅ Tests
+
+```bash
+npm test
+```
+
 ## 📄 License
 
 MIT
