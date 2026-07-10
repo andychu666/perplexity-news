@@ -19,8 +19,8 @@ news digest — no login, no API key, no Perplexity Pro account required.
 - **20 cards per category** with headline, hero image, source count, and publish time
 - Dark-themed responsive HTML output with sticky nav, card grid, and scroll-spy
 - Each card links to its full Perplexity Discover page with all sources
-- Reliable source counts via `innerText` extraction — no digit concatenation bugs (#9, #10)
-- Handles both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#10)
+- Reliable source counts via DOM leaf extraction — no digit concatenation bugs (#9, #10)
+- Handles both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#9, #10)
 - Hydration poll loop with dependency injection, fully testable without Chrome (#8)
 - Zero runtime dependencies beyond Node.js built-ins + pi's `browser-tools`
 - Built for **daily cron automation**
@@ -99,7 +99,8 @@ perplexity-news/
 ├── scripts/
 │   └── daily-news.js              # Main scraper + HTML generator
 ├── test/
-│   └── hydration-poll.test.js     # Unit tests for hydration polling
+│   ├── hydration-poll.test.js     # Unit tests for hydration polling
+│   └── card-parse.test.js         # Unit tests for card metadata extraction
 ├── follow-ups/                    # Code review follow-up notes
 ├── package.json                   # npm test entrypoint
 ├── README.md                      # This file
@@ -111,8 +112,8 @@ perplexity-news/
 1. Ensures Chrome is running on `localhost:9222` (auto-starts headless if not)
 2. Navigates to each Perplexity Discover category page in sequence
 3. Waits for story cards to hydrate via poll loop with configurable timeout (#8)
-4. Extracts story cards from the DOM using `innerText` to prevent digit concatenation (#10)
-5. Parses both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#10)
+4. Extracts card data from DOM leaf elements to prevent digit concatenation (#9, #10)
+5. Parses both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#9, #10)
 6. Generates a self-contained dark-themed HTML file with all data
 7. Saves to `~/Downloads/perplexity-news-YYYY-MM-DD.html`
 
