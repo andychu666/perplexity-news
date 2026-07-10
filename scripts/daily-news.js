@@ -113,6 +113,44 @@ function waitForHydratedCards({
   return { cardCount, pollErrors };
 }
 
+// ── Card parsing ────────────────────────────────────────────────────
+// Parse card metadata from leaf element texts. Exported for unit testing.
+// Perplexity card leaves: headline, "Published" (optional), date/time (optional),
+// description (optional), "N sources".
+function parseCardFromLeaves(leafTexts) {
+  var sources = null;
+  var sourcesIdx = -1;
+  for (var i = 0; i < leafTexts.length; i++) {
+    var m = leafTexts[i].match(/^(\d+)\s*sources?$/i);
+    if (m) { sources = m[1]; sourcesIdx = i; break; }
+  }
+
+  var published = null;
+  for (var i = 0; i < leafTexts.length - 1; i++) {
+    if (/^Published$/i.test(leafTexts[i])) {
+      var candidate = leafTexts[i + 1];
+      if (/^\d+\s*(?:hours?|minutes?|days?)\s*ago$/i.test(candidate) ||
+          /^[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}$/.test(candidate)) {
+        published = candidate;
+      }
+      break;
+    }
+  }
+
+  var headline = null;
+  for (var i = 0; i < leafTexts.length; i++) {
+    if (i === sourcesIdx) continue;
+    if (/^Published$/i.test(leafTexts[i])) continue;
+    if (published && leafTexts[i] === published) continue;
+    headline = leafTexts[i];
+    break;
+  }
+  if (!headline) headline = "";
+
+  if (headline.length < 10 && !sources) return null;
+  return { headline: headline, published: published, sources: sources };
+}
+
 // ── Scrape one category ─────────────────────────────────────────────
 function scrapeCategory(cat) {
   const url = `https://www.perplexity.ai/discover/${cat.id}`;
@@ -134,29 +172,29 @@ function scrapeCategory(cat) {
     categoryName: cat.name,
     evaluateCount: () => execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
   });
+  // Inject parseCardFromLeaves so the browser runs the exact same logic
+  // that unit tests exercise — no duplicated regexes.
   const extractJS = `
 (function() {
   var catPath = "${catPath}";
+  var parseCardFromLeaves = ${parseCardFromLeaves.toString()};
   var cards = Array.from(document.querySelectorAll('a[href*="' + catPath + '"]')).map(function(a) {
-    var fullText = a.innerText.trim();
-    if (fullText.length < 20) return null;
     var href = a.getAttribute("href");
     if (href.startsWith("/")) href = "https://www.perplexity.ai" + href;
     var img = a.querySelector("img");
     var imgSrc = img ? img.src : null;
 
-    var sourcesMatch = fullText.match(/(\\d+)\\s*sources?/i);
-    var sources = sourcesMatch ? sourcesMatch[1] : null;
+    // Collect leaf elements (no child elements) with visible text.
+    var leaves = Array.from(a.querySelectorAll("*")).filter(function(el) {
+      return el.children.length === 0 && el.textContent.trim().length > 0;
+    });
+    var leafTexts = leaves.map(function(el) { return el.textContent.trim(); });
 
-    var publishedMatch = fullText.match(/Published\\s*\\n*\\s*([\\d]+\\s*(?:hours?|minutes?|days?)\\s*ago|[A-Za-z]{3,9}\\s+\\d{1,2},\\s*\\d{4})/i);
-    var published = publishedMatch ? publishedMatch[1] : null;
-
-    var headline = fullText;
-    var pubIdx = headline.search(/^Published/im);
-    if (pubIdx > 0) headline = headline.substring(0, pubIdx).trim();
-    if (sources) headline = headline.replace(/\\d+\\s*sources?$/mi, "").trim();
-
-    return { headline: headline, href: href, imgSrc: imgSrc, published: published, sources: sources };
+    var card = parseCardFromLeaves(leafTexts);
+    if (!card) return null;
+    card.href = href;
+    card.imgSrc = imgSrc;
+    return card;
   }).filter(function(c) { return c !== null; });
   return JSON.stringify({ count: cards.length, cards: cards });
 })()`;
@@ -488,4 +526,5 @@ if (require.main === module) {
 
 module.exports = {
   waitForHydratedCards,
+  parseCardFromLeaves,
 };

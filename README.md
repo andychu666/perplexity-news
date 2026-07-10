@@ -19,7 +19,10 @@ news digest — no login, no API key, no Perplexity Pro account required.
 - **20 cards per category** with headline, hero image, source count, and publish time
 - Dark-themed responsive HTML output with sticky nav, card grid, and scroll-spy
 - Each card links to its full Perplexity Discover page with all sources
-- Zero dependencies beyond Node.js built-ins + `puppeteer-core` (shared with pi's browser-tools)
+- Reliable source counts via DOM leaf extraction — no digit concatenation bugs (#9, #10)
+- Handles both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#9, #10)
+- Hydration poll loop with dependency injection, fully testable without Chrome (#8)
+- Zero runtime dependencies beyond Node.js built-ins + pi's `browser-tools`
 - Built for **daily cron automation**
 
 ## 🚀 Quick Start
@@ -37,11 +40,13 @@ node scripts/daily-news.js --open
 
 ### Prerequisites
 
-- Chrome/Chromium running with remote debugging on port `9222`
-- `puppeteer-core` installed (auto-resolved from pi's browser-tools skill)
+- **Node.js** `>= 18`
+- **Chrome/Chromium** installed — auto-detected from common paths and auto-started headless on port `9222` if not already running
+- **pi browser-tools** at `~/.pi/agent/skills/pi-skills/browser-tools/` — the script uses `browser-nav.js` and `browser-eval.js` from this skill. This is the only setup dependency; no separate `puppeteer-core` install needed.
+
+To start the browser (optional — the script auto-starts headless if port 9222 is free):
 
 ```bash
-# Start Chrome (if using pi's browser-tools skill)
 ~/.pi/agent/skills/pi-skills/browser-tools/browser-start.js --profile
 ```
 
@@ -90,20 +95,27 @@ Dark-themed responsive layout with images:
 
 ```
 perplexity-news/
-├── SKILL.md               # Pi skill definition & usage guide
+├── SKILL.md                       # Pi skill definition & usage guide
 ├── scripts/
-│   └── daily-news.js      # Main scraper + HTML generator
-├── README.md              # This file
-└── LICENSE                # MIT
+│   └── daily-news.js              # Main scraper + HTML generator
+├── test/
+│   ├── hydration-poll.test.js     # Unit tests for hydration polling
+│   └── card-parse.test.js         # Unit tests for card metadata extraction
+├── follow-ups/                    # Code review follow-up notes
+├── package.json                   # npm test entrypoint
+├── README.md                      # This file
+└── LICENSE                        # MIT
 ```
 
 ## 🛠️ How It Works
 
-1. Connects to Chrome CDP on `localhost:9222`
+1. Ensures Chrome is running on `localhost:9222` (auto-starts headless if not)
 2. Navigates to each Perplexity Discover category page in sequence
-3. Extracts story cards from the DOM (headline, image, URL, source count, publish time)
-4. Generates a self-contained dark-themed HTML file with all data
-5. Saves to `~/Downloads/perplexity-news-YYYY-MM-DD.html`
+3. Waits for story cards to hydrate via poll loop with configurable timeout (#8)
+4. Extracts card data from DOM leaf elements to prevent digit concatenation (#9, #10)
+5. Parses both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#9, #10)
+6. Generates a self-contained dark-themed HTML file with all data
+7. Saves to `~/Downloads/perplexity-news-YYYY-MM-DD.html`
 
 ## 📋 Options
 
