@@ -221,28 +221,54 @@ function scrapeCategory(cat) {
 
 const CDP_URL = process.env.PERPLEXITY_CDP || "http://127.0.0.1:9222";
 const ORIGIN = "https://www.perplexity.ai";
+const WS_TIMEOUT_MS = 15000;
+const HTTP_TIMEOUT_MS = 20000;
+
+// Node <21 has no global WebSocket. Fail loudly rather than letting a
+// ReferenceError silently disable the whole API-first path.
+function webSocketCtor() {
+  if (typeof WebSocket === "undefined") {
+    throw new Error("no global WebSocket (needs Node 21+) - API path unavailable");
+  }
+  return WebSocket;
+}
+
+// Every network call is bounded, so a hung Chrome/CDP or a stalled API response
+// cannot block the run (and the UI fallback still gets its turn).
+async function fetchJson(url, options = {}) {
+  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
 async function cdpSessionCookies() {
-  const targets = await (await fetch(`${CDP_URL}/json/list`)).json();
+  const WebSocketImpl = webSocketCtor();
+  const targets = await fetchJson(`${CDP_URL}/json/list`);
+  if (!Array.isArray(targets)) throw new Error("CDP /json/list did not return an array");
   const page = targets.find((t) => t.type === "page" && /perplexity\.ai/.test(t.url || ""))
     || targets.find((t) => t.type === "page");
   if (!page || !page.webSocketDebuggerUrl) throw new Error("no CDP page target");
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    ws.onopen = res;
-    ws.onerror = () => rej(new Error("CDP websocket failed"));
-  });
+
+  const ws = new WebSocketImpl(page.webSocketDebuggerUrl);
   try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("CDP websocket handshake timed out")), WS_TIMEOUT_MS);
+      ws.onopen = () => { clearTimeout(timer); resolve(); };
+      ws.onerror = () => { clearTimeout(timer); reject(new Error("CDP websocket failed")); };
+    });
     // Network.getCookies is only exposed on a page target.
-    return await new Promise((res, rej) => {
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("CDP getCookies timed out")), WS_TIMEOUT_MS);
+      const settle = (fn, value) => { clearTimeout(timer); ws.onmessage = null; fn(value); };
       ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.id !== 1) return;
-        if (msg.error) rej(new Error(JSON.stringify(msg.error)));
-        else res(msg.result.cookies || []);
+        let msg;
+        // Keepalive/partial frames are not guaranteed to be JSON.
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (!msg || msg.id !== 1) return;
+        if (msg.error) settle(reject, new Error(JSON.stringify(msg.error)));
+        else settle(resolve, (msg.result && msg.result.cookies) || []);
       };
       ws.send(JSON.stringify({ id: 1, method: "Network.getCookies", params: { urls: [ORIGIN] } }));
-      setTimeout(() => rej(new Error("CDP getCookies timed out")), 15000);
     });
   } finally {
     ws.close();
@@ -251,7 +277,7 @@ async function cdpSessionCookies() {
 
 async function apiGet(pathname, cookies) {
   const csrf = cookies.find((c) => /csrf/i.test(c.name));
-  const res = await fetch(`${ORIGIN}${pathname}`, {
+  return fetchJson(`${ORIGIN}${pathname}`, {
     headers: {
       cookie: cookies.map((c) => `${c.name}=${c.value}`).join("; "),
       accept: "application/json, text/plain, */*",
@@ -259,8 +285,6 @@ async function apiGet(pathname, cookies) {
       ...(csrf ? { "x-csrf-token": csrf.value.split("|")[0] } : {}),
     },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
 }
 
 // Mirrors the UI's wording ("13 hours ago") so the rendered HTML is unchanged.
