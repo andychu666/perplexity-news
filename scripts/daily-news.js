@@ -221,6 +221,9 @@ function scrapeCategory(cat) {
 
 const CDP_URL = process.env.PERPLEXITY_CDP || "http://127.0.0.1:9222";
 const ORIGIN = "https://www.perplexity.ai";
+// Kept together so a server-side version bump is a one-line change.
+const FEED_VERSION = "2.18";
+const FEED_SOURCE = "default";
 const WS_TIMEOUT_MS = 15000;
 const HTTP_TIMEOUT_MS = 20000;
 
@@ -287,25 +290,30 @@ async function apiGet(pathname, cookies) {
   });
 }
 
-// Mirrors the UI's wording ("13 hours ago") so the rendered HTML is unchanged.
+// Mirrors the UI's wording ("13 hours ago", "1 hour ago") so the rendered HTML
+// matches, including singular units and clock-skewed (future) timestamps.
 function relativeTime(iso) {
   if (!iso) return null;
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return null;
   const minutes = Math.round((Date.now() - then) / 60000);
-  if (minutes < 60) return `${Math.max(1, minutes)} minutes ago`;
+  if (minutes <= 0) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} hours ago`;
-  return `${Math.round(hours / 24)} days ago`;
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function apiCard(item) {
+  if (!item || typeof item !== "object") return null;
   const preview = item.web_results_preview || {};
   const image = (item.featured_images && item.featured_images[0]) || null;
   return {
     headline: item.title || item.short_title || "",
     published: relativeTime(item.published_timestamp || item.updated_datetime),
-    sources: preview.total_count != null ? String(preview.total_count) : null,
+    sources: preview.total_count !== null && preview.total_count !== undefined
+      ? String(preview.total_count) : null,
     href: item.url || (item.slug ? `${ORIGIN}/discover/${item.slug}` : "#"),
     imgSrc: (image && (image.image || image.thumbnail)) || null,
   };
@@ -313,21 +321,33 @@ function apiCard(item) {
 
 async function fetchFeedItems({ pages = 2, perPage = 100 } = {}) {
   const cookies = await cdpSessionCookies();
-  const items = [];
+  // Offsets are independent, so fetch the pages concurrently instead of doubling
+  // the latency with sequential awaits.
+  const requests = [];
   for (let i = 0; i < pages; i++) {
-    const body = await apiGet(
-      `/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=2.18&source=default`,
+    requests.push(apiGet(
+      `/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=${FEED_VERSION}&source=${FEED_SOURCE}`,
       cookies
-    );
-    const batch = body.items || [];
-    items.push(...batch);
+    ));
+  }
+  const outcomes = await Promise.allSettled(requests);
+  const items = [];
+  for (const outcome of outcomes) {
+    // A failed page must not discard the pages that did succeed.
+    if (outcome.status !== "fulfilled") continue;
+    const body = outcome.value;
+    const batch = body && Array.isArray(body.items) ? body.items : [];
+    if (batch.length === 0) break;
+    items.push(...batch.filter((entry) => entry && typeof entry === "object"));
     if (batch.length < perPage) break;
   }
   return items;
 }
 
+// Keep Unicode letters/digits: the feed carries non-English headlines, and
+// stripping them would collapse distinct items onto the same key.
 function normalizeTitle(text) {
-  return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 // ── HTML generators ─────────────────────────────────────────────────
@@ -595,8 +615,14 @@ async function main() {
   } catch (e) {
     log(`API unavailable (${e.message}); relying on UI scraping`);
   }
+  // Key on the same headline apiCard() uses, and skip empty ones so blank
+  // headlines cannot collide on "".
   const apiByTitle = new Map();
-  for (const item of feedItems) apiByTitle.set(normalizeTitle(item.title), apiCard(item));
+  for (const item of feedItems) {
+    const card = apiCard(item);
+    const key = card ? normalizeTitle(card.headline) : "";
+    if (key) apiByTitle.set(key, card);
+  }
 
   const RETRY_DELAY_MS = 5000;
   const RETRY_MAX = 2;
@@ -604,36 +630,42 @@ async function main() {
   for (const cat of CATEGORIES) {
     let result = { count: 0, cards: [] };
     let attempts = 0;
+    let servedByApi = false;
 
     // The API exposes one general feed, so it can serve the Top section outright;
     // the per-category feeds only exist in the UI.
     if (cat.id === "top" && feedItems.length > 0) {
-      result = { count: feedItems.length, cards: feedItems.map(apiCard) };
-      log(`  ${cat.name}: ${result.count} cards (API)`);
+      // Blank headlines would render as empty cards; the UI path filters them too.
+      const cards = feedItems.map(apiCard).filter((card) => card && card.headline);
+      result = { count: cards.length, cards };
+      servedByApi = true;
+      log(`  ${cat.name}: ${cards.length} cards (API)`);
     } else {
-    for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
-      if (attempt > 0) {
-        log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
-        execSync(`sleep ${RETRY_DELAY_MS / 1000}`);
+      for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
+        if (attempt > 0) {
+          log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
+          execSync(`sleep ${RETRY_DELAY_MS / 1000}`);
+        }
+        attempts++;
+        try {
+          result = scrapeCategory(cat);
+        } catch (e) {
+          log(`  ${cat.name}: ERROR — ${e.message}`);
+        }
+        if (result.count > 0) break;
+        if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
       }
-      attempts++;
-      try {
-        result = scrapeCategory(cat);
-      } catch (e) {
-        log(`  ${cat.name}: ERROR — ${e.message}`);
-      }
-      if (result.count > 0) break;
-      if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
-    }
-    log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+      log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
     }
 
     // Fill publish times the UI does not render, using the API's timestamps.
-    if (feedItems.length > 0) {
+    // API cards already carry one, so only scraped categories need this.
+    if (!servedByApi && feedItems.length > 0) {
       let filled = 0;
       for (const card of result.cards) {
-        if (card.published) continue;
-        const hit = apiByTitle.get(normalizeTitle(card.headline));
+        const key = normalizeTitle(card.headline);
+        if (!key || card.published) continue;
+        const hit = apiByTitle.get(key);
         if (hit && hit.published) {
           card.published = hit.published;
           filled++;
@@ -678,4 +710,9 @@ if (require.main === module) {
 module.exports = {
   waitForHydratedCards,
   parseCardFromLeaves,
+  // Pure helpers, exported so the node --test suite can cover their edge cases
+  // (missing/invalid timestamps, clock skew, unit rounding, empty headlines).
+  relativeTime,
+  normalizeTitle,
+  apiCard,
 };
