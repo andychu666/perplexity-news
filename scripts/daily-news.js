@@ -213,6 +213,99 @@ function scrapeCategory(cat) {
   }
 }
 
+// ── API path (primary) ──────────────────────────────────────────────
+// The Discover feed endpoint carries every card's exact publish time and needs
+// no page rendering, so it is tried first; UI scraping stays as the fallback
+// (and remains the only source for the per-category feeds, which the API does
+// not expose — `category`/`topic` params are ignored, verified 2026-09-16).
+
+const CDP_URL = process.env.PERPLEXITY_CDP || "http://127.0.0.1:9222";
+const ORIGIN = "https://www.perplexity.ai";
+
+async function cdpSessionCookies() {
+  const targets = await (await fetch(`${CDP_URL}/json/list`)).json();
+  const page = targets.find((t) => t.type === "page" && /perplexity\.ai/.test(t.url || ""))
+    || targets.find((t) => t.type === "page");
+  if (!page || !page.webSocketDebuggerUrl) throw new Error("no CDP page target");
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((res, rej) => {
+    ws.onopen = res;
+    ws.onerror = () => rej(new Error("CDP websocket failed"));
+  });
+  try {
+    // Network.getCookies is only exposed on a page target.
+    return await new Promise((res, rej) => {
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.id !== 1) return;
+        if (msg.error) rej(new Error(JSON.stringify(msg.error)));
+        else res(msg.result.cookies || []);
+      };
+      ws.send(JSON.stringify({ id: 1, method: "Network.getCookies", params: { urls: [ORIGIN] } }));
+      setTimeout(() => rej(new Error("CDP getCookies timed out")), 15000);
+    });
+  } finally {
+    ws.close();
+  }
+}
+
+async function apiGet(pathname, cookies) {
+  const csrf = cookies.find((c) => /csrf/i.test(c.name));
+  const res = await fetch(`${ORIGIN}${pathname}`, {
+    headers: {
+      cookie: cookies.map((c) => `${c.name}=${c.value}`).join("; "),
+      accept: "application/json, text/plain, */*",
+      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+      ...(csrf ? { "x-csrf-token": csrf.value.split("|")[0] } : {}),
+    },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// Mirrors the UI's wording ("13 hours ago") so the rendered HTML is unchanged.
+function relativeTime(iso) {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return null;
+  const minutes = Math.round((Date.now() - then) / 60000);
+  if (minutes < 60) return `${Math.max(1, minutes)} minutes ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hours ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+function apiCard(item) {
+  const preview = item.web_results_preview || {};
+  const image = (item.featured_images && item.featured_images[0]) || null;
+  return {
+    headline: item.title || item.short_title || "",
+    published: relativeTime(item.published_timestamp || item.updated_datetime),
+    sources: preview.total_count != null ? String(preview.total_count) : null,
+    href: item.url || (item.slug ? `${ORIGIN}/discover/${item.slug}` : "#"),
+    imgSrc: (image && (image.image || image.thumbnail)) || null,
+  };
+}
+
+async function fetchFeedItems({ pages = 2, perPage = 100 } = {}) {
+  const cookies = await cdpSessionCookies();
+  const items = [];
+  for (let i = 0; i < pages; i++) {
+    const body = await apiGet(
+      `/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=2.18&source=default`,
+      cookies
+    );
+    const batch = body.items || [];
+    items.push(...batch);
+    if (batch.length < perPage) break;
+  }
+  return items;
+}
+
+function normalizeTitle(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
 // ── HTML generators ─────────────────────────────────────────────────
 function escapeHtml(str) {
   return String(str)
@@ -470,12 +563,30 @@ async function main() {
   // Ensure Chrome is running with remote debugging
   ensureChrome();
 
+  // API first: one call carries exact publish times and needs no rendering.
+  let feedItems = [];
+  try {
+    feedItems = await fetchFeedItems();
+    log(`API: ${feedItems.length} feed item(s) with publish times`);
+  } catch (e) {
+    log(`API unavailable (${e.message}); relying on UI scraping`);
+  }
+  const apiByTitle = new Map();
+  for (const item of feedItems) apiByTitle.set(normalizeTitle(item.title), apiCard(item));
+
   const RETRY_DELAY_MS = 5000;
   const RETRY_MAX = 2;
   const allData = {};
   for (const cat of CATEGORIES) {
     let result = { count: 0, cards: [] };
     let attempts = 0;
+
+    // The API exposes one general feed, so it can serve the Top section outright;
+    // the per-category feeds only exist in the UI.
+    if (cat.id === "top" && feedItems.length > 0) {
+      result = { count: feedItems.length, cards: feedItems.map(apiCard) };
+      log(`  ${cat.name}: ${result.count} cards (API)`);
+    } else {
     for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
       if (attempt > 0) {
         log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
@@ -490,8 +601,24 @@ async function main() {
       if (result.count > 0) break;
       if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
     }
-    allData[cat.id] = result;
     log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+    }
+
+    // Fill publish times the UI does not render, using the API's timestamps.
+    if (feedItems.length > 0) {
+      let filled = 0;
+      for (const card of result.cards) {
+        if (card.published) continue;
+        const hit = apiByTitle.get(normalizeTitle(card.headline));
+        if (hit && hit.published) {
+          card.published = hit.published;
+          filled++;
+        }
+      }
+      if (filled > 0) log(`  ${cat.name}: +${filled} publish time(s) from API`);
+    }
+
+    allData[cat.id] = result;
   }
 
   const totalCards = CATEGORIES.reduce((sum, c) => sum + (allData[c.id]?.count || 0), 0);
