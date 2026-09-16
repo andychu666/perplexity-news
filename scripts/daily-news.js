@@ -8,7 +8,7 @@
  * Usage: node daily-news.js [--out ~/Downloads] [--limit 10] [--open]
  */
 
-const { execSync, spawn } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -69,8 +69,9 @@ function log(msg) {
   process.stderr.write("[news] " + msg + "\n");
 }
 
+// Native sleep: no shell, no subprocess spawned per poll.
 function sleepSync(ms) {
-  execSync(`sleep ${ms / 1000}`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
 }
 
 function waitForHydratedCards({
@@ -118,17 +119,17 @@ function waitForHydratedCards({
 // Perplexity card leaves: headline, "Published" (optional), date/time (optional),
 // description (optional), "N sources".
 function parseCardFromLeaves(leafTexts) {
-  var sources = null;
-  var sourcesIdx = -1;
-  for (var i = 0; i < leafTexts.length; i++) {
-    var m = leafTexts[i].match(/^(\d+)\s*sources?$/i);
+  let sources = null;
+  let sourcesIdx = -1;
+  for (let i = 0; i < leafTexts.length; i++) {
+    const m = leafTexts[i].match(/^(\d+)\s*sources?$/i);
     if (m) { sources = m[1]; sourcesIdx = i; break; }
   }
 
-  var published = null;
-  for (var i = 0; i < leafTexts.length - 1; i++) {
+  let published = null;
+  for (let i = 0; i < leafTexts.length - 1; i++) {
     if (/^Published$/i.test(leafTexts[i])) {
-      var candidate = leafTexts[i + 1];
+      const candidate = leafTexts[i + 1];
       if (/^\d+\s*(?:hours?|minutes?|days?)\s*ago$/i.test(candidate) ||
           /^[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}$/.test(candidate)) {
         published = candidate;
@@ -137,8 +138,8 @@ function parseCardFromLeaves(leafTexts) {
     }
   }
 
-  var headline = null;
-  for (var i = 0; i < leafTexts.length; i++) {
+  let headline = null;
+  for (let i = 0; i < leafTexts.length; i++) {
     if (i === sourcesIdx) continue;
     if (/^Published$/i.test(leafTexts[i])) continue;
     if (published && leafTexts[i] === published) continue;
@@ -161,7 +162,7 @@ function scrapeCategory(cat) {
   // Navigate
   const catPath = `/discover/${cat.id}/`;
 
-  execSync(`"${NAV}" "${url}" 2>&1`, { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
+  execFileSync(NAV, [url], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
 
   // Poll for card hydration instead of a fixed sleep — Perplexity is a React
   // SPA and hydration time varies (slow network / busy Chrome). Without this,
@@ -170,7 +171,7 @@ function scrapeCategory(cat) {
   const safeCountJS = countJS.replace(/'/g, "'\\''");
   waitForHydratedCards({
     categoryName: cat.name,
-    evaluateCount: () => execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
+    evaluateCount: () => execFileSync(EVAL, [countJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
   });
   // Inject parseCardFromLeaves so the browser runs the exact same logic
   // that unit tests exercise — no duplicated regexes.
@@ -199,16 +200,18 @@ function scrapeCategory(cat) {
   return JSON.stringify({ count: cards.length, cards: cards });
 })()`;
 
-  const safeJS = extractJS.replace(/'/g, "'\\''");
-  const raw = execSync(`"${EVAL}" '${safeJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" });
+  // execFileSync passes argv straight through: no shell, so nothing in the JS
+  // (or a future backslash/quote) can break out of the command.
+  const raw = execFileSync(EVAL, [extractJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" });
 
   try {
     return JSON.parse(raw);
   } catch (e) {
     log(`  Parse error for ${cat.name}: ${e.message}`);
-    // Try extracting JSON from stderr-free output
     const match = raw.match(/(\{[\s\S]*\})/);
-    if (match) return JSON.parse(match[1]);
+    if (match) {
+      try { return JSON.parse(match[1]); } catch { /* truncated output */ }
+    }
     return { count: 0, cards: [] };
   }
 }
@@ -333,13 +336,13 @@ async function fetchFeedItems({ pages = 2, perPage = 100 } = {}) {
   const outcomes = await Promise.allSettled(requests);
   const items = [];
   for (const outcome of outcomes) {
-    // A failed page must not discard the pages that did succeed.
+    // A failed (or short) page must not discard the pages that did succeed: all
+    // pages were requested concurrently, so stopping early would only throw away
+    // data that is already in hand.
     if (outcome.status !== "fulfilled") continue;
     const body = outcome.value;
     const batch = body && Array.isArray(body.items) ? body.items : [];
-    if (batch.length === 0) break;
     items.push(...batch.filter((entry) => entry && typeof entry === "object"));
-    if (batch.length < perPage) break;
   }
   return items;
 }
@@ -359,12 +362,27 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+// Only http(s) links may end up in the digest: a scraped javascript:/data: URL
+// would survive HTML escaping and become a live anchor.
+function safeUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const protocol = new URL(raw).protocol;
+    return protocol === "http:" || protocol === "https:" ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
 function cardHtml(card) {
   const headline = escapeHtml(card.headline || "");
-  const url = escapeHtml(card.href || "#");
-  const imgSrc = card.imgSrc ? escapeHtml(card.imgSrc) : "";
+  const url = escapeHtml(safeUrl(card.href) || "#");
+  const imgSrc = card.imgSrc ? escapeHtml(safeUrl(card.imgSrc)) : "";
   const published = card.published ? `🕐 ${escapeHtml(card.published)}` : "";
-  const sources = card.sources ? `📊 ${card.sources} sources` : "";
+  const sources = card.sources
+    ? `📊 ${escapeHtml(String(card.sources))} source${String(card.sources) === "1" ? "" : "s"}`
+    : "";
   const meta = [published, sources].filter(Boolean).join(" · ");
 
   const imgHtml = imgSrc
@@ -528,7 +546,7 @@ ${sections}
 function ensureChrome() {
   // Already running?
   try {
-    execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
+    execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, stdio: "ignore" });
     return;
   } catch { /* not running */ }
 
@@ -543,7 +561,7 @@ function ensureChrome() {
   let chromeBin = null;
   for (const c of candidates) {
     try {
-      execSync(`test -x "${c}"`);
+      fs.accessSync(c, fs.constants.X_OK);
       chromeBin = c;
       break;
     } catch { /* not found */ }
@@ -556,16 +574,25 @@ function ensureChrome() {
   const userDataDir = path.join(os.homedir(), ".cache", "browser-tools");
   fs.mkdirSync(userDataDir, { recursive: true });
 
-  // Kill any stale lock files that prevent Chrome from starting
+  // Only clear locks that are actually stale: deleting them while a live Chrome
+  // owns the profile can corrupt it.
   for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
-    try { fs.unlinkSync(path.join(userDataDir, lock)); } catch (e) {
+    const lockPath = path.join(userDataDir, lock);
+    try {
+      const age = Date.now() - fs.statSync(lockPath).mtimeMs;
+      if (age > 30000) {
+        fs.unlinkSync(lockPath);
+        log(`Removed stale ${lock} (${Math.round(age / 1000)}s old)`);
+      }
+    } catch (e) {
       if (e.code !== "ENOENT") log(`Warning: cannot remove ${lock} \u2014 ${e.message}`);
     }
   }
 
   log(`Starting Chrome (${chromeBin})...`);
   const child = spawn(chromeBin, [
-    "--remote-debugging-port=9222",
+    // Follow the configured CDP endpoint instead of assuming the default port.
+    `--remote-debugging-port=${new URL(CDP_URL).port || 9222}`,
     `--user-data-dir=${userDataDir}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -578,7 +605,7 @@ function ensureChrome() {
   let firstError = null;
   for (let i = 0; i < 60; i++) {
     try {
-      execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
+      execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, stdio: "ignore" });
       log("Chrome ready on :9222");
       return;
     } catch (e) {
@@ -588,7 +615,7 @@ function ensureChrome() {
     if (i === 12 && firstError) {
       log(`Chrome not ready after 6s — last curl error: ${firstError.message || firstError.stderr || firstError}`);
     }
-    execSync("sleep 0.5");
+    sleepSync(500);
   }
 
   log("ERROR: Chrome failed to start within 30 seconds");
@@ -644,7 +671,7 @@ async function main() {
       for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
         if (attempt > 0) {
           log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
-          execSync(`sleep ${RETRY_DELAY_MS / 1000}`);
+          sleepSync(RETRY_DELAY_MS);
         }
         attempts++;
         try {
@@ -686,6 +713,12 @@ async function main() {
   }
 
   const html = buildHtml(allData, opts.limit);
+  // The suffix becomes part of a filename: reject anything that could traverse
+  // out of --out (e.g. ../../).
+  if (opts.suffix && !/^[A-Za-z0-9_-]+$/.test(opts.suffix)) {
+    log(`ERROR: --suffix may only contain letters, digits, - and _ (got "${opts.suffix}")`);
+    process.exit(2);
+  }
   const suffixPart = opts.suffix ? `-${opts.suffix}` : "";
   const outPath = path.join(opts.out, `perplexity-news-${today}${suffixPart}.html`);
   fs.mkdirSync(opts.out, { recursive: true });
@@ -695,8 +728,12 @@ async function main() {
   log(`✅ Saved: ${outPath} (${kb} KB)`);
 
   if (opts.open) {
-    try { execSync(`xdg-open "${outPath}" >/dev/null 2>&1`); } catch {}
-    log("Opened in browser");
+    try {
+      execFileSync("xdg-open", [outPath], { stdio: "ignore" });
+      log("Opened in browser");
+    } catch (e) {
+      log(`Warning: could not open the digest (${e.message})`);
+    }
   }
 }
 
