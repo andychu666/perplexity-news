@@ -151,6 +151,26 @@ function parseCardFromLeaves(leafTexts) {
   return { headline: headline, published: published, sources: sources };
 }
 
+// ── Bot challenge ───────────────────────────────────────────────────
+// Cloudflare's managed challenge: the page title is "Just a moment..." and
+// API responses carry `cf-mitigated: challenge`. The script only reports it;
+// it never tries to pass the challenge.
+function isChallengeTitle(title) {
+  return /^just a moment/i.test(String(title).trim());
+}
+
+function botChallengeError(message) {
+  const err = new Error(`bot challenge: ${message}`);
+  err.botChallenge = true;
+  return err;
+}
+
+function noCardsMessage(blocked) {
+  return blocked
+    ? "ERROR: No cards scraped. Perplexity answered with a Cloudflare bot challenge (see the log above)."
+    : "ERROR: No cards scraped. Check Chrome and Perplexity availability.";
+}
+
 // ── Scrape one category ─────────────────────────────────────────────
 function scrapeCategory(cat) {
   const url = `https://www.perplexity.ai/discover/${cat.id}`;
@@ -168,10 +188,18 @@ function scrapeCategory(cat) {
   // categories can intermittently return 0 cards (as happened in the night run).
   const countJS = `document.querySelectorAll('a[href*="${catPath}"]').length`;
   const safeCountJS = countJS.replace(/'/g, "'\\''");
-  waitForHydratedCards({
+  const { cardCount } = waitForHydratedCards({
     categoryName: cat.name,
     evaluateCount: () => execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
   });
+  // No cards after the full wait: if the tab is still on Cloudflare's
+  // interstitial, say so instead of extracting an empty page and retrying.
+  if (cardCount === 0) {
+    const title = execSync(`"${EVAL}" 'document.title' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }).trim();
+    if (isChallengeTitle(title)) {
+      throw botChallengeError(`page is a Cloudflare interstitial (title "${title}")`);
+    }
+  }
   // Inject parseCardFromLeaves so the browser runs the exact same logic
   // that unit tests exercise — no duplicated regexes.
   const extractJS = `
@@ -249,9 +277,9 @@ async function cdpSessionCookies() {
   }
 }
 
-async function apiGet(pathname, cookies) {
+async function apiGet(pathname, cookies, fetchFn = fetch) {
   const csrf = cookies.find((c) => /csrf/i.test(c.name));
-  const res = await fetch(`${ORIGIN}${pathname}`, {
+  const res = await fetchFn(`${ORIGIN}${pathname}`, {
     headers: {
       cookie: cookies.map((c) => `${c.name}=${c.value}`).join("; "),
       accept: "application/json, text/plain, */*",
@@ -259,7 +287,11 @@ async function apiGet(pathname, cookies) {
       ...(csrf ? { "x-csrf-token": csrf.value.split("|")[0] } : {}),
     },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const mitigated = res.headers.get("cf-mitigated");
+    if (mitigated === "challenge") throw botChallengeError(`HTTP ${res.status} (cf-mitigated: ${mitigated})`);
+    throw new Error(`HTTP ${res.status}${mitigated ? ` (cf-mitigated: ${mitigated})` : ""}`);
+  }
   return res.json();
 }
 
@@ -551,6 +583,39 @@ function ensureChrome() {
   process.exit(1);
 }
 
+// ── Retry loop ──────────────────────────────────────────────────────
+// Retries a category that came back empty. A bot challenge stops the retries
+// for that category: retrying only repeats the same challenged request.
+const RETRY_DELAY_MS = 5000;
+const RETRY_MAX = 2;
+
+function scrapeWithRetries(cat, { scrape = scrapeCategory, sleep = sleepSync, logFn = log } = {}) {
+  let result = { count: 0, cards: [] };
+  let attempts = 0;
+  let blocked = false;
+  for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
+    if (attempt > 0) {
+      logFn(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
+      sleep(RETRY_DELAY_MS);
+    }
+    attempts++;
+    try {
+      result = scrape(cat);
+    } catch (e) {
+      logFn(`  ${cat.name}: ERROR — ${e.message}`);
+      if (e.botChallenge) {
+        blocked = true;
+        logFn(`  ${cat.name}: blocked by bot challenge — not retrying`);
+        break;
+      }
+    }
+    if (result.count > 0) break;
+    if (attempt < RETRY_MAX) logFn(`  ${cat.name}: 0 cards (attempt ${attempts})`);
+  }
+  logFn(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+  return { result, attempts, blocked };
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -565,21 +630,20 @@ async function main() {
 
   // API first: one call carries exact publish times and needs no rendering.
   let feedItems = [];
+  let blocked = false;
   try {
     feedItems = await fetchFeedItems();
     log(`API: ${feedItems.length} feed item(s) with publish times`);
   } catch (e) {
+    if (e.botChallenge) blocked = true;
     log(`API unavailable (${e.message}); relying on UI scraping`);
   }
   const apiByTitle = new Map();
   for (const item of feedItems) apiByTitle.set(normalizeTitle(item.title), apiCard(item));
 
-  const RETRY_DELAY_MS = 5000;
-  const RETRY_MAX = 2;
   const allData = {};
   for (const cat of CATEGORIES) {
     let result = { count: 0, cards: [] };
-    let attempts = 0;
 
     // The API exposes one general feed, so it can serve the Top section outright;
     // the per-category feeds only exist in the UI.
@@ -587,21 +651,9 @@ async function main() {
       result = { count: feedItems.length, cards: feedItems.map(apiCard) };
       log(`  ${cat.name}: ${result.count} cards (API)`);
     } else {
-    for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
-      if (attempt > 0) {
-        log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
-        execSync(`sleep ${RETRY_DELAY_MS / 1000}`);
-      }
-      attempts++;
-      try {
-        result = scrapeCategory(cat);
-      } catch (e) {
-        log(`  ${cat.name}: ERROR — ${e.message}`);
-      }
-      if (result.count > 0) break;
-      if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
-    }
-    log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+      const scraped = scrapeWithRetries(cat);
+      result = scraped.result;
+      if (scraped.blocked) blocked = true;
     }
 
     // Fill publish times the UI does not render, using the API's timestamps.
@@ -625,7 +677,7 @@ async function main() {
   log(`Total: ${totalCards} cards across ${CATEGORIES.length} categories`);
 
   if (totalCards === 0) {
-    log("ERROR: No cards scraped. Check Chrome and Perplexity availability.");
+    log(noCardsMessage(blocked));
     process.exit(1);
   }
 
@@ -654,4 +706,8 @@ if (require.main === module) {
 module.exports = {
   waitForHydratedCards,
   parseCardFromLeaves,
+  isChallengeTitle,
+  apiGet,
+  scrapeWithRetries,
+  noCardsMessage,
 };
