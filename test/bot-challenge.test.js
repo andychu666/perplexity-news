@@ -121,6 +121,21 @@ test("fetchFeedItems keeps earlier pages when a later page fails", () => {
   assert.deepEqual(logs, ["API page 2 failed (HTTP 500); keeping 3 item(s)"]);
 });
 
+test("fetchFeedItems logs a failed later page to stderr by default", (t) => {
+  const stderr = [];
+  t.mock.method(process.stderr, "write", (chunk) => {
+    stderr.push(String(chunk));
+    return true;
+  });
+  let calls = 0;
+  const get = () => { if (calls++ === 0) return page(3); throw new Error("HTTP 500"); };
+  const items = fetchFeedItems({ perPage: 3, get });
+  t.mock.restoreAll();
+
+  assert.equal(items.length, 3);
+  assert.deepEqual(stderr, ["[news] API page 2 failed (HTTP 500); keeping 3 item(s)\n"]);
+});
+
 test("fetchFeedItems stops after a short page and drops non-object entries", () => {
   let calls = 0;
   const get = () => { calls++; return { items: [{ title: "a" }, null, "x"] }; };

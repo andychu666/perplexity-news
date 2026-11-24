@@ -181,6 +181,7 @@ test("collectDigest ignores feed entries that are not objects", () => {
   });
 
   assert.deepEqual(allData.top.cards.map((card) => card.headline), ["Real story"]);
+  assert.equal(allData.top.count, 1);
 });
 
 test("collectDigest marks the run blocked when one scraped category was challenged", () => {
@@ -229,6 +230,8 @@ test("collectDigest backfills missing publish times of scraped cards from the AP
     { title: "Echo story", published_timestamp: hoursAgo(6) },
     { title: "Echo story" },
     { title: "Business story", published_timestamp: hoursAgo(7) },
+    // Dated, but without a headline: it must not fill the scraped "" card.
+    { published_timestamp: hoursAgo(8) },
   ];
   const scrapedCards = {
     tech: [
@@ -304,12 +307,12 @@ function titleReader(answers) {
 }
 
 test("openDiscoverTab waits after an empty, failed or challenged title read", () => {
-  const title = titleReader(["", new Error("Execution context was destroyed"), "Just a moment...", "Discover - Perplexity"]);
+  const title = titleReader(["", " \n", new Error("Execution context was destroyed"), "Just a moment...", "Discover - Perplexity"]);
   const sleeps = [];
   openDiscoverTab({ nav: quiet, title, sleep: (ms) => sleeps.push(ms) });
 
-  assert.equal(title.reads, 4);
-  assert.deepEqual(sleeps, [1000, 1000, 1000]);
+  assert.equal(title.reads, 5);
+  assert.deepEqual(sleeps, [1000, 1000, 1000, 1000]);
 });
 
 test("openDiscoverTab reports the interstitial after 31 title reads a second apart", () => {
@@ -336,6 +339,15 @@ test("openDiscoverTab reports the last eval error when every title read fails", 
   assert.equal(title.reads, 31);
 });
 
+test("openDiscoverTab reports thrown non-Error values as text", () => {
+  for (const thrown of ["eval exited 1", undefined]) {
+    assert.throws(
+      () => openDiscoverTab({ nav: quiet, title: () => { throw thrown; }, sleep: quiet }),
+      (error) => error.message === `Could not read Discover page title: ${thrown}` && !error.botChallenge,
+    );
+  }
+});
+
 test("openDiscoverTab reports a timeout for titles that stay empty", () => {
   const title = titleReader([""]);
   assert.throws(
@@ -352,6 +364,10 @@ test("cdpPort uses the HTTP and HTTPS defaults for implicit or canonicalized por
   assert.equal(cdpPort("http://example.invalid:80"), "80");
   assert.equal(cdpPort("https://example.invalid"), "443");
   assert.equal(cdpPort("https://example.invalid:443"), "443");
+});
+
+test("cdpPort falls back to 9222 for another scheme without a port", () => {
+  assert.equal(cdpPort("tcp://example.invalid"), "9222");
 });
 
 test("headlessWarning stays quiet for a headed Chrome", () => {

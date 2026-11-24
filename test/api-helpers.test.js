@@ -4,7 +4,6 @@ const { relativeTime, normalizeTitle, apiCard, selectTopApiCards } = require("..
 
 const now = Date.parse("2025-01-02T12:00:00.000Z");
 const minutesAgo = (minutes) => new Date(now - minutes * 60000).toISOString();
-const futureTimestamp = "9999-01-01T00:00:00.000Z";
 
 test("relativeTime: boundaries and unit wording match the UI", () => {
   const cases = [
@@ -45,13 +44,19 @@ test("normalizeTitle: keeps non-Latin headlines distinct", () => {
   assert.strictEqual(normalizeTitle(null), "");
 });
 
-test("apiCard: shape guards and field mapping", () => {
+test("normalizeTitle: keeps digits, so 2027 and 2028 stay distinct", () => {
+  assert.strictEqual(normalizeTitle("Election 2027"), "election2027");
+  assert.notStrictEqual(normalizeTitle("Election 2027"), normalizeTitle("Election 2028"));
+});
+
+test("apiCard: shape guards and field mapping", (t) => {
+  t.mock.method(Date, "now", () => now);
   assert.strictEqual(apiCard(null), null);
   assert.strictEqual(apiCard("nope"), null);
   const card = apiCard({
     title: "Headline",
     slug: "abc",
-    published_timestamp: futureTimestamp,
+    published_timestamp: minutesAgo(180),
     web_results_preview: { total_count: 7 },
     featured_images: [{ image: "https://img/1.jpg" }],
   });
@@ -59,7 +64,7 @@ test("apiCard: shape guards and field mapping", () => {
   assert.strictEqual(card.sources, "7");
   assert.strictEqual(card.href, "https://www.perplexity.ai/discover/abc");
   assert.strictEqual(card.imgSrc, "https://img/1.jpg");
-  assert.strictEqual(card.published, "just now");
+  assert.strictEqual(card.published, "3 hours ago");
   // short_title is used when title is missing
   assert.strictEqual(apiCard({ short_title: "Short" }).headline, "Short");
 });
@@ -71,16 +76,17 @@ test("apiCard: zero, missing and null source counts stay distinct", () => {
   assert.strictEqual(apiCard({}).sources, null);
 });
 
-test("apiCard: explicit URLs and fallback fields map to cards", () => {
+test("apiCard: explicit URLs and fallback fields map to cards", (t) => {
+  t.mock.method(Date, "now", () => now);
   const card = apiCard({
     slug: "abc",
     url: "https://www.perplexity.ai/discover/top/custom",
-    updated_datetime: futureTimestamp,
+    updated_datetime: minutesAgo(5),
     featured_images: [{ thumbnail: "https://img/thumb.jpg" }],
   });
   assert.strictEqual(card.href, "https://www.perplexity.ai/discover/top/custom");
   assert.strictEqual(apiCard({}).href, "#");
-  assert.strictEqual(card.published, "just now");
+  assert.strictEqual(card.published, "5 minutes ago");
   assert.strictEqual(card.imgSrc, "https://img/thumb.jpg");
 });
 

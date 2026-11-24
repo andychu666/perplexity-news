@@ -226,10 +226,18 @@ test("by default a lock whose PID is running is kept", (t) => {
   assert.deepEqual(singletonEntries(dir), entries);
 });
 
-// PID 1 belongs to root, so a normal user's probe gets EPERM.
-test("by default a lock whose PID belongs to another user is kept", { skip: process.getuid?.() === 0 && "root may signal any process" }, (t) => {
-  const { dir } = makeProfile(t, `${hostname}-1`);
+// Probing another user's process fails with EPERM. process.kill is stubbed,
+// so the result does not depend on who runs the tests (root may signal any PID).
+test("by default a lock whose PID belongs to another user is kept", (t) => {
+  const { dir } = makeProfile(t, `${hostname}-${pid}`);
+  const probes = [];
+  t.mock.method(process, "kill", (...args) => {
+    probes.push(args);
+    throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+  });
   clearStaleLocks(dir, { hostname, logFn: () => {} });
+  t.mock.restoreAll();
 
+  assert.deepEqual(probes, [[pid, 0]]);
   assert.deepEqual(singletonEntries(dir), entries);
 });
