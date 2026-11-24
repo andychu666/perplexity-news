@@ -842,6 +842,8 @@ module.exports = {
   normalizeTitle,
   apiCard,
   selectTopApiCards,
+  safeUrl,
+  cardHtml,
   isChallengeTitle,
   apiGet,
   fetchFeedItems,
