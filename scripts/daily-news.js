@@ -199,7 +199,6 @@ function scrapeCategory(cat) {
   // SPA and hydration time varies (slow network / busy Chrome). Without this,
   // categories can intermittently return 0 cards (as happened in the night run).
   const countJS = `document.querySelectorAll('a[href*="${catPath}"]').length`;
-  const safeCountJS = countJS.replace(/'/g, "'\\''");
   const { cardCount } = waitForHydratedCards({
     categoryName: cat.name,
     evaluateCount: () => execFileSync(EVAL, [countJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
