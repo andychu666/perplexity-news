@@ -52,7 +52,7 @@ Produces `perplexity-news-YYYY-MM-DD-morning.html` and `perplexity-news-YYYY-MM-
 | `--out <dir>` | `~/Downloads` | Output directory |
 | `--limit <N>` | `10` | Cards per category |
 | `--open` | — | Open the HTML file after generation (xdg-open) |
-| `--suffix <str>` | `""` | Append a label to the filename, e.g. `--suffix morning` → `perplexity-news-2026-06-11-morning.html` |
+| `--suffix <str>` | `""` | Append a label to the filename, e.g. `--suffix morning` → `perplexity-news-2026-06-11-morning.html`. Use one or more ASCII letters, digits, hyphens, or underscores. |
 
 ## Category URLs Scraped
 

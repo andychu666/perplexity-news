@@ -133,7 +133,7 @@ If Cloudflare still answers with its challenge, the script does not retry that c
 | `--out <dir>` | `~/Downloads` | Output directory |
 | `--limit <N>` | `10` | Cards per category |
 | `--open` | — | Open HTML after generation |
-| `--suffix <str>` | `""` | Append label to filename, e.g. `--suffix morning` |
+| `--suffix <str>` | `""` | Append label to filename, e.g. `--suffix morning`. Use one or more ASCII letters, digits, hyphens, or underscores. |
 
 ## ✅ Tests
 
