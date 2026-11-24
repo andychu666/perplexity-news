@@ -341,8 +341,11 @@ test("openDiscoverTab reports a timeout for titles that stay empty", () => {
 
 // ── Chrome launch helpers ───────────────────────────────────────────
 
-test("cdpPort falls back to 9222 for a URL without a port", () => {
-  assert.equal(cdpPort("http://example.invalid"), "9222");
+test("cdpPort uses the HTTP and HTTPS defaults for implicit or canonicalized ports", () => {
+  assert.equal(cdpPort("http://example.invalid"), "80");
+  assert.equal(cdpPort("http://example.invalid:80"), "80");
+  assert.equal(cdpPort("https://example.invalid"), "443");
+  assert.equal(cdpPort("https://example.invalid:443"), "443");
 });
 
 test("headlessWarning stays quiet for a headed Chrome", () => {

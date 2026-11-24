@@ -8,16 +8,16 @@ const path = require("node:path");
 const script = path.join(__dirname, "../scripts/daily-news.js");
 const tools = ".pi/agent/skills/pi-skills/browser-tools";
 
-// Runs `driver` in a child Node with HOME in a temp dir and a dead CDP URL.
+// Runs the script or a `driver` in a child Node with an isolated HOME and CDP URL.
 // The preload replaces child_process before the script loads, because the
-// script binds execFileSync at require time. No test here calls main(), so
-// ensureChrome() never runs.
+// script binds execFileSync at require time.
 function runChild(t, { preload, driver, setup = () => ({}) }) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "news-fake-browser-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const preloadPath = path.join(home, "preload.cjs");
   fs.writeFileSync(preloadPath, preload);
-  const result = spawnSync(process.execPath, ["--require", preloadPath, "-e", driver], {
+  const args = driver === undefined ? [script] : ["-e", driver];
+  const result = spawnSync(process.execPath, ["--require", preloadPath, ...args], {
     env: { ...process.env, HOME: home, PERPLEXITY_CDP: "http://127.0.0.1:1", ...setup(home) }, // gitleaks:allow (IPv4 loopback)
     encoding: "utf8",
     timeout: 10000,
@@ -333,5 +333,32 @@ test("prepareChromeLaunch() with its defaults makes the profile under HOME and c
   assert.deepEqual(run.stderr.split("\n").filter(Boolean), [
     "[news] Removed stale SingletonLock",
     "[news] Starting Chrome (/usr/bin/chromium under xvfb-run)...",
+  ]);
+});
+
+test("the CLI logs an asynchronous Chrome spawn error before readiness fails", (t) => {
+  const run = runChild(t, {
+    preload: `${ACCESS_PRELOAD}
+const { EventEmitter } = require("node:events");
+Atomics.wait = () => "timed-out";
+childProcess.execFileSync = (file) => {
+  if (file !== "curl") throw new Error("unexpected subprocess " + file);
+  throw new Error("CDP unavailable");
+};
+childProcess.spawn = () => {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  process.nextTick(() => child.emit("error", new Error("launch denied")));
+  return child;
+};
+`,
+    setup: () => ({ FAKE_EXECUTABLES: JSON.stringify(["/usr/bin/chromium", "/usr/bin/xvfb-run"]) }),
+  });
+  assert.equal(run.status, 1, run.stderr);
+  const lines = run.stderr.trim().split("\n");
+  assert.deepEqual(lines.slice(-3), [
+    "[news] Warning: could not start Chrome (launch denied)",
+    "[news] Chrome not ready after 6s — last curl error: CDP unavailable",
+    "[news] ERROR: Chrome failed to start within 30 seconds",
   ]);
 });

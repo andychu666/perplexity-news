@@ -633,7 +633,11 @@ function clearStaleLocks(dir, { hostname = os.hostname(), isAlive = isProcessAli
 const XVFB_RUN = "/usr/bin/xvfb-run";
 
 function cdpPort(url) {
-  return new URL(url).port || "9222";
+  const { port, protocol } = new URL(url);
+  if (port) return port;
+  if (protocol === "http:") return "80";
+  if (protocol === "https:") return "443";
+  return "9222";
 }
 
 function headlessWarning(versionText) {
@@ -711,7 +715,7 @@ function prepareChromeLaunch({
   return { cmd, args, port };
 }
 
-function ensureChrome() {
+async function ensureChrome() {
   // Already running?
   try {
     const version = execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
@@ -726,7 +730,15 @@ function ensureChrome() {
   if (!launch) process.exit(1);
   const { cmd, args, port } = launch;
   const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
-  child.unref();
+  // Let the spawn result arrive before the synchronous readiness loop.
+  await new Promise((resolve) => {
+    child.once("spawn", resolve);
+    child.once("error", (error) => {
+      log(`Warning: could not start Chrome (${error.message})`);
+      resolve();
+    });
+    child.unref();
+  });
   let firstError = null;
   for (let i = 0; i < 60; i++) {
     try {
@@ -865,7 +877,7 @@ async function main() {
   log(`Output dir: ${opts.out}`);
   log(`Cards per category: ${opts.limit}`);
 
-  ensureChrome();
+  await ensureChrome();
   const { allData, blocked } = collectDigest();
 
   const totalCards = CATEGORIES.reduce((sum, c) => sum + (allData[c.id]?.count || 0), 0);
