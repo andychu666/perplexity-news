@@ -13,17 +13,20 @@ const {
 
 test("collectDigest serves the API Top cards and scrapes other categories", () => {
   const calls = [];
+  const logFn = () => {};
   const { allData, blocked } = collectDigest({
     openTab: () => calls.push("open"),
-    fetchFeed: () => {
+    fetchFeed: ({ logFn: logger }) => {
+      assert.equal(logger, logFn);
       calls.push("feed");
       return [{ title: "API headline" }];
     },
-    scrape: ({ id }) => {
+    scrape: ({ id }, { logFn: logger }) => {
+      assert.equal(logger, logFn);
       calls.push(id);
       return { result: { count: 1, cards: [{ headline: id }] }, blocked: false };
     },
-    logFn: () => {},
+    logFn,
   });
 
   assert.deepEqual(calls, ["open", "feed", "tech", "finance", "arts", "sports", "entertainment"]);
@@ -86,19 +89,20 @@ test("chromeCommand wraps headed Chrome in xvfb-run", () => {
 test("prepareChromeLaunch creates the profile and calls lock cleanup before preparing the command", () => {
   const calls = [];
   const userDataDir = "/scratch/profile";
+  const logFn = () => {};
   const launch = prepareChromeLaunch({
     cdpUrl: "http://example.invalid:9333",
     userDataDir,
     access: (...args) => calls.push(["access", ...args]),
     mkdir: (...args) => calls.push(["mkdir", ...args]),
-    clearLocks: (dir) => calls.push(["clearLocks", dir]),
-    logFn: () => {},
+    clearLocks: (dir, options) => calls.push(["clearLocks", dir, options]),
+    logFn,
   });
 
   assert.deepEqual(calls, [
     ["access", "/usr/bin/google-chrome-stable", constants.X_OK],
     ["mkdir", userDataDir, { recursive: true }],
-    ["clearLocks", userDataDir],
+    ["clearLocks", userDataDir, { logFn }],
     ["access", "/usr/bin/xvfb-run", constants.X_OK],
   ]);
   assert.equal(launch.cmd, "/usr/bin/xvfb-run");

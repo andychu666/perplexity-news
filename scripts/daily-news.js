@@ -356,7 +356,7 @@ function selectTopApiCards(cards) {
   return cards.filter((card) => typeof card?.headline === "string" && card.headline.trim());
 }
 
-function fetchFeedItems({ pages = 2, perPage = 100, get = apiGet } = {}) {
+function fetchFeedItems({ pages = 2, perPage = 100, get = apiGet, logFn = log } = {}) {
   const items = [];
   for (let i = 0; i < pages; i++) {
     let body;
@@ -366,7 +366,7 @@ function fetchFeedItems({ pages = 2, perPage = 100, get = apiGet } = {}) {
       // A failed first page is the API failing: throw so the cause is logged.
       // A failed later page must not discard the pages already in hand.
       if (i === 0) throw e;
-      log(`API page ${i + 1} failed (${e.message}); keeping ${items.length} item(s)`);
+      logFn(`API page ${i + 1} failed (${e.message}); keeping ${items.length} item(s)`);
       break;
     }
     const batch = body && Array.isArray(body.items) ? body.items : [];
@@ -695,7 +695,7 @@ function prepareChromeLaunch({
 
   const userDataDir = profileDir ?? path.join(os.homedir(), ".cache", "browser-tools");
   mkdir(userDataDir, { recursive: true });
-  clearLocks(userDataDir);
+  clearLocks(userDataDir, { logFn });
 
   const port = cdpPort(cdpUrl);
   // Cloudflare challenges headless Chrome but lets a headed one through, so
@@ -803,7 +803,7 @@ function collectDigest({
   let blocked = false;
   try {
     openTab();
-    feedItems = fetchFeed();
+    feedItems = fetchFeed({ logFn });
     logFn(`API: ${feedItems.length} feed item(s) with publish times`);
   } catch (e) {
     if (e.botChallenge) blocked = true;
@@ -830,7 +830,7 @@ function collectDigest({
       servedByApi = true;
       logFn(`  ${cat.name}: ${topCards.length} cards (API)`);
     } else {
-      const scraped = scrape(cat);
+      const scraped = scrape(cat, { logFn });
       result = scraped.result;
       if (scraped.blocked) blocked = true;
     }

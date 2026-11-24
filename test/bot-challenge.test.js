@@ -114,9 +114,11 @@ test("fetchFeedItems throws when the first page fails, so the cause is logged", 
 
 test("fetchFeedItems keeps earlier pages when a later page fails", () => {
   let calls = 0;
+  const logs = [];
   const get = () => { if (calls++ === 0) return page(3); throw new Error("HTTP 500"); };
-  assert.equal(fetchFeedItems({ perPage: 3, get }).length, 3);
+  assert.equal(fetchFeedItems({ perPage: 3, get, logFn: (message) => logs.push(message) }).length, 3);
   assert.equal(calls, 2);
+  assert.deepEqual(logs, ["API page 2 failed (HTTP 500); keeping 3 item(s)"]);
 });
 
 test("fetchFeedItems stops after a short page and drops non-object entries", () => {
