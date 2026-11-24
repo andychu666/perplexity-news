@@ -77,7 +77,7 @@ function log(msg) {
 
 // Native sleep: no shell, no subprocess spawned per poll.
 function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function waitForHydratedCards({
@@ -394,8 +394,7 @@ function escapeHtml(str) {
 // Only http(s) links may end up in the digest: a scraped javascript:/data: URL
 // would survive HTML escaping and become a live anchor.
 function safeUrl(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
+  const raw = String(value).trim();
   try {
     const protocol = new URL(raw).protocol;
     return protocol === "http:" || protocol === "https:" ? raw : "";
@@ -407,7 +406,7 @@ function safeUrl(value) {
 function cardHtml(card) {
   const headline = escapeHtml(card.headline || "");
   const url = escapeHtml(safeUrl(card.href) || "#");
-  const imgSrc = card.imgSrc ? escapeHtml(safeUrl(card.imgSrc)) : "";
+  const imgSrc = escapeHtml(safeUrl(card.imgSrc));
   const published = card.published ? `🕐 ${escapeHtml(card.published)}` : "";
   const sources = card.sources
     ? `📊 ${escapeHtml(String(card.sources))} source${String(card.sources) === "1" ? "" : "s"}`
@@ -842,7 +841,7 @@ function collectDigest({
       let filled = 0;
       for (const card of result.cards) {
         const key = normalizeTitle(card.headline);
-        if (!key || card.published) continue;
+        if (card.published) continue;
         const hit = apiByTitle.get(key);
         if (hit && hit.published) {
           card.published = hit.published;
