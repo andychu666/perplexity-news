@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { relativeTime, normalizeTitle, apiCard } = require("../scripts/daily-news.js");
+const { relativeTime, normalizeTitle, apiCard, selectTopApiCards } = require("../scripts/daily-news.js");
 
 test("relativeTime: singular units match the UI wording", () => {
   const at = (mins) => new Date(Date.now() - mins * 60000).toISOString();
@@ -41,4 +41,15 @@ test("apiCard: shape guards and field mapping", () => {
   assert.strictEqual(card.published, "1 hour ago");
   // short_title is used when title is missing
   assert.strictEqual(apiCard({ short_title: "Short" }).headline, "Short");
+});
+
+test("Top falls back when feed items have no headline", () => {
+  const items = [{ slug: "missing-title" }, { title: "" }];
+  assert.deepStrictEqual(selectTopApiCards(items.map(apiCard)), []);
+});
+
+test("Top API cards filter whitespace headlines and keep usable cards", () => {
+  const items = [{ title: " \t\n" }, { short_title: " " }, { title: "Headline", slug: "abc" }];
+  const cards = items.map(apiCard);
+  assert.deepStrictEqual(selectTopApiCards(cards), [cards[2]]);
 });

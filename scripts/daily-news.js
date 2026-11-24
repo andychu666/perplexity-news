@@ -333,6 +333,10 @@ function apiCard(item) {
   };
 }
 
+function selectTopApiCards(cards) {
+  return cards.filter((card) => typeof card?.headline === "string" && card.headline.trim());
+}
+
 function fetchFeedItems({ pages = 2, perPage = 100, get = apiGet } = {}) {
   const items = [];
   for (let i = 0; i < pages; i++) {
@@ -750,13 +754,14 @@ async function main() {
   }
   // Key on the same headline apiCard() uses, and skip empty ones so blank
   // headlines cannot collide on "".
+  const apiCards = feedItems.map(apiCard);
   const apiByTitle = new Map();
-  for (const item of feedItems) {
-    const card = apiCard(item);
+  for (const card of apiCards) {
     const key = card ? normalizeTitle(card.headline) : "";
     if (key) apiByTitle.set(key, card);
   }
 
+  const topCards = selectTopApiCards(apiCards);
   const allData = {};
   for (const cat of CATEGORIES) {
     let result = { count: 0, cards: [] };
@@ -764,12 +769,10 @@ async function main() {
 
     // The API exposes one general feed, so it can serve the Top section outright;
     // the per-category feeds only exist in the UI.
-    if (cat.id === "top" && feedItems.length > 0) {
-      // Blank headlines would render as empty cards; the UI path filters them too.
-      const cards = feedItems.map(apiCard).filter((card) => card && card.headline);
-      result = { count: cards.length, cards };
+    if (cat.id === "top" && topCards.length > 0) {
+      result = { count: topCards.length, cards: topCards };
       servedByApi = true;
-      log(`  ${cat.name}: ${cards.length} cards (API)`);
+      log(`  ${cat.name}: ${topCards.length} cards (API)`);
     } else {
       const scraped = scrapeWithRetries(cat);
       result = scraped.result;
@@ -839,6 +842,7 @@ module.exports = {
   relativeTime,
   normalizeTitle,
   apiCard,
+  selectTopApiCards,
   isChallengeTitle,
   apiGet,
   fetchFeedItems,
