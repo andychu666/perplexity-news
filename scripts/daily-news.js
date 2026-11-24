@@ -152,6 +152,31 @@ function parseCardFromLeaves(leafTexts) {
   return { headline: headline, published: published, sources: sources };
 }
 
+// ── Bot challenge ───────────────────────────────────────────────────
+// Cloudflare's managed challenge: the page title is "Just a moment..." and
+// API responses carry `cf-mitigated: challenge`. A headed Chrome passes it on
+// its own within a few seconds; the script only waits and reports, it never
+// tries to solve or evade it.
+function isChallengeTitle(title) {
+  return /^just a moment/i.test(String(title).trim());
+}
+
+function botChallengeError(message) {
+  const err = new Error(`bot challenge: ${message}`);
+  err.botChallenge = true;
+  return err;
+}
+
+function noCardsMessage(blocked) {
+  return blocked
+    ? "ERROR: No cards scraped. Perplexity answered with a Cloudflare bot challenge (see the log above)."
+    : "ERROR: No cards scraped. Check Chrome and Perplexity availability.";
+}
+
+function pageTitle() {
+  return execFileSync(EVAL, ["document.title"], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }).trim();
+}
+
 // ── Scrape one category ─────────────────────────────────────────────
 function scrapeCategory(cat) {
   const url = `https://www.perplexity.ai/discover/${cat.id}`;
@@ -169,10 +194,18 @@ function scrapeCategory(cat) {
   // categories can intermittently return 0 cards (as happened in the night run).
   const countJS = `document.querySelectorAll('a[href*="${catPath}"]').length`;
   const safeCountJS = countJS.replace(/'/g, "'\\''");
-  waitForHydratedCards({
+  const { cardCount } = waitForHydratedCards({
     categoryName: cat.name,
     evaluateCount: () => execFileSync(EVAL, [countJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
   });
+  // No cards after the full wait: if the tab is still on Cloudflare's
+  // interstitial, say so instead of extracting an empty page and retrying.
+  if (cardCount === 0) {
+    const title = pageTitle();
+    if (isChallengeTitle(title)) {
+      throw botChallengeError(`page is a Cloudflare interstitial (title "${title}")`);
+    }
+  }
   // Inject parseCardFromLeaves so the browser runs the exact same logic
   // that unit tests exercise — no duplicated regexes.
   const extractJS = `
@@ -227,70 +260,42 @@ const ORIGIN = "https://www.perplexity.ai";
 // Kept together so a server-side version bump is a one-line change.
 const FEED_VERSION = "2.18";
 const FEED_SOURCE = "default";
-const WS_TIMEOUT_MS = 15000;
-const HTTP_TIMEOUT_MS = 20000;
+const CHALLENGE_WAIT_MS = 30000;
 
-// Node <21 has no global WebSocket. Fail loudly rather than letting a
-// ReferenceError silently disable the whole API-first path.
-function webSocketCtor() {
-  if (typeof WebSocket === "undefined") {
-    throw new Error("no global WebSocket (needs Node 21+) - API path unavailable");
+// The API call needs a tab on perplexity.ai that is past the interstitial.
+// browser-eval fails while the challenge reloads the page, so a failed read
+// counts as "still waiting".
+function openDiscoverTab() {
+  execFileSync(NAV, [`${ORIGIN}/discover/top`], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
+  let title = "";
+  for (let waited = 0; waited <= CHALLENGE_WAIT_MS; waited += 1000) {
+    try {
+      title = pageTitle();
+      if (!isChallengeTitle(title)) return;
+    } catch { /* page is reloading */ }
+    sleepSync(1000);
   }
-  return WebSocket;
+  throw botChallengeError(`page is a Cloudflare interstitial (title "${title}")`);
 }
 
-// Every network call is bounded, so a hung Chrome/CDP or a stalled API response
-// cannot block the run (and the UI fallback still gets its turn).
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, { ...options, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+// The fetch runs inside the Discover tab, so it carries the browser's own
+// cookies and Cloudflare clearance. A Node-side fetch with copied cookies is
+// challenged even when the tab is not (verified 2026-11-24).
+function browserEval(js) {
+  return execFileSync(EVAL, [js], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
 
-async function cdpSessionCookies() {
-  const WebSocketImpl = webSocketCtor();
-  const targets = await fetchJson(`${CDP_URL}/json/list`);
-  if (!Array.isArray(targets)) throw new Error("CDP /json/list did not return an array");
-  const page = targets.find((t) => t.type === "page" && /perplexity\.ai/.test(t.url || ""))
-    || targets.find((t) => t.type === "page");
-  if (!page || !page.webSocketDebuggerUrl) throw new Error("no CDP page target");
-
-  const ws = new WebSocketImpl(page.webSocketDebuggerUrl);
-  try {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("CDP websocket handshake timed out")), WS_TIMEOUT_MS);
-      ws.onopen = () => { clearTimeout(timer); resolve(); };
-      ws.onerror = () => { clearTimeout(timer); reject(new Error("CDP websocket failed")); };
-    });
-    // Network.getCookies is only exposed on a page target.
-    return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("CDP getCookies timed out")), WS_TIMEOUT_MS);
-      const settle = (fn, value) => { clearTimeout(timer); ws.onmessage = null; fn(value); };
-      ws.onmessage = (ev) => {
-        let msg;
-        // Keepalive/partial frames are not guaranteed to be JSON.
-        try { msg = JSON.parse(ev.data); } catch { return; }
-        if (!msg || msg.id !== 1) return;
-        if (msg.error) settle(reject, new Error(JSON.stringify(msg.error)));
-        else settle(resolve, (msg.result && msg.result.cookies) || []);
-      };
-      ws.send(JSON.stringify({ id: 1, method: "Network.getCookies", params: { urls: [ORIGIN] } }));
-    });
-  } finally {
-    ws.close();
+function apiGet(pathname, evalFn = browserEval) {
+  const js = `(async () => {
+    const r = await fetch(${JSON.stringify(pathname)}, { headers: { accept: "application/json" } });
+    return JSON.stringify({ status: r.status, mitigated: r.headers.get("cf-mitigated"), body: r.ok ? await r.json() : null });
+  })()`;
+  const res = JSON.parse(evalFn(js));
+  if (res.status < 200 || res.status >= 300) {
+    if (res.mitigated === "challenge") throw botChallengeError(`HTTP ${res.status} (cf-mitigated: challenge)`);
+    throw new Error(`HTTP ${res.status}${res.mitigated ? ` (cf-mitigated: ${res.mitigated})` : ""}`);
   }
-}
-
-async function apiGet(pathname, cookies) {
-  const csrf = cookies.find((c) => /csrf/i.test(c.name));
-  return fetchJson(`${ORIGIN}${pathname}`, {
-    headers: {
-      cookie: cookies.map((c) => `${c.name}=${c.value}`).join("; "),
-      accept: "application/json, text/plain, */*",
-      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-      ...(csrf ? { "x-csrf-token": csrf.value.split("|")[0] } : {}),
-    },
-  });
+  return res.body;
 }
 
 // Mirrors the UI's wording ("13 hours ago", "1 hour ago") so the rendered HTML
@@ -322,27 +327,22 @@ function apiCard(item) {
   };
 }
 
-async function fetchFeedItems({ pages = 2, perPage = 100 } = {}) {
-  const cookies = await cdpSessionCookies();
-  // Offsets are independent, so fetch the pages concurrently instead of doubling
-  // the latency with sequential awaits.
-  const requests = [];
-  for (let i = 0; i < pages; i++) {
-    requests.push(apiGet(
-      `/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=${FEED_VERSION}&source=${FEED_SOURCE}`,
-      cookies
-    ));
-  }
-  const outcomes = await Promise.allSettled(requests);
+function fetchFeedItems({ pages = 2, perPage = 100, get = apiGet } = {}) {
   const items = [];
-  for (const outcome of outcomes) {
-    // A failed (or short) page must not discard the pages that did succeed: all
-    // pages were requested concurrently, so stopping early would only throw away
-    // data that is already in hand.
-    if (outcome.status !== "fulfilled") continue;
-    const body = outcome.value;
+  for (let i = 0; i < pages; i++) {
+    let body;
+    try {
+      body = get(`/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=${FEED_VERSION}&source=${FEED_SOURCE}`);
+    } catch (e) {
+      // A failed first page is the API failing: throw so the cause is logged.
+      // A failed later page must not discard the pages already in hand.
+      if (i === 0) throw e;
+      log(`API page ${i + 1} failed (${e.message}); keeping ${items.length} item(s)`);
+      break;
+    }
     const batch = body && Array.isArray(body.items) ? body.items : [];
     items.push(...batch.filter((entry) => entry && typeof entry === "object"));
+    if (batch.length < perPage) break;
   }
   return items;
 }
@@ -546,7 +546,12 @@ ${sections}
 function ensureChrome() {
   // Already running?
   try {
-    execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, stdio: "ignore" });
+    const version = execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    // Not closed here: another tool may own it. Without it, the next run
+    // starts a headed Chrome (see below).
+    if (/HeadlessChrome/.test(version)) {
+      log("Warning: the Chrome on the CDP port is headless, and Cloudflare challenges headless Chrome. Close it to let the next run start a headed one.");
+    }
     return;
   } catch { /* not running */ }
 
@@ -589,18 +594,32 @@ function ensureChrome() {
     }
   }
 
-  log(`Starting Chrome (${chromeBin})...`);
-  const child = spawn(chromeBin, [
+  const chromeArgs = [
     // Follow the configured CDP endpoint instead of assuming the default port.
     `--remote-debugging-port=${new URL(CDP_URL).port || 9222}`,
     `--user-data-dir=${userDataDir}`,
     "--no-first-run",
     "--no-default-browser-check",
-    "--headless=new",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--no-sandbox",
-  ], { detached: true, stdio: "ignore" });
+  ];
+  // Cloudflare challenges headless Chrome but lets a headed one through, so
+  // run headed inside a virtual X display: no window on the desktop, and no
+  // login session needed.
+  const XVFB_RUN = "/usr/bin/xvfb-run";
+  let cmd = XVFB_RUN;
+  let args = ["-a", "-s", "-screen 0 1280x900x24", chromeBin, "--ozone-platform=x11", ...chromeArgs];
+  try {
+    fs.accessSync(XVFB_RUN, fs.constants.X_OK);
+  } catch {
+    log(`Warning: ${XVFB_RUN} not found; starting headless Chrome, which Cloudflare may challenge (install xvfb)`);
+    cmd = chromeBin;
+    args = [...chromeArgs, "--headless=new"];
+  }
+
+  log(`Starting Chrome (${chromeBin}${cmd === XVFB_RUN ? " under xvfb-run" : ", headless"})...`);
+  const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
   child.unref();
   let firstError = null;
   for (let i = 0; i < 60; i++) {
@@ -622,6 +641,39 @@ function ensureChrome() {
   process.exit(1);
 }
 
+// ── Retry loop ──────────────────────────────────────────────────────
+// Retries a category that came back empty. A bot challenge stops the retries
+// for that category: retrying only repeats the same challenged request.
+const RETRY_DELAY_MS = 5000;
+const RETRY_MAX = 2;
+
+function scrapeWithRetries(cat, { scrape = scrapeCategory, sleep = sleepSync, logFn = log } = {}) {
+  let result = { count: 0, cards: [] };
+  let attempts = 0;
+  let blocked = false;
+  for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
+    if (attempt > 0) {
+      logFn(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
+      sleep(RETRY_DELAY_MS);
+    }
+    attempts++;
+    try {
+      result = scrape(cat);
+    } catch (e) {
+      logFn(`  ${cat.name}: ERROR — ${e.message}`);
+      if (e.botChallenge) {
+        blocked = true;
+        logFn(`  ${cat.name}: blocked by bot challenge — not retrying`);
+        break;
+      }
+    }
+    if (result.count > 0) break;
+    if (attempt < RETRY_MAX) logFn(`  ${cat.name}: 0 cards (attempt ${attempts})`);
+  }
+  logFn(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+  return { result, attempts, blocked };
+}
+
 // ── Main ────────────────────────────────────────────────────────────
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -636,10 +688,13 @@ async function main() {
 
   // API first: one call carries exact publish times and needs no rendering.
   let feedItems = [];
+  let blocked = false;
   try {
-    feedItems = await fetchFeedItems();
+    openDiscoverTab();
+    feedItems = fetchFeedItems();
     log(`API: ${feedItems.length} feed item(s) with publish times`);
   } catch (e) {
+    if (e.botChallenge) blocked = true;
     log(`API unavailable (${e.message}); relying on UI scraping`);
   }
   // Key on the same headline apiCard() uses, and skip empty ones so blank
@@ -651,12 +706,9 @@ async function main() {
     if (key) apiByTitle.set(key, card);
   }
 
-  const RETRY_DELAY_MS = 5000;
-  const RETRY_MAX = 2;
   const allData = {};
   for (const cat of CATEGORIES) {
     let result = { count: 0, cards: [] };
-    let attempts = 0;
     let servedByApi = false;
 
     // The API exposes one general feed, so it can serve the Top section outright;
@@ -668,21 +720,9 @@ async function main() {
       servedByApi = true;
       log(`  ${cat.name}: ${cards.length} cards (API)`);
     } else {
-      for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
-        if (attempt > 0) {
-          log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
-          sleepSync(RETRY_DELAY_MS);
-        }
-        attempts++;
-        try {
-          result = scrapeCategory(cat);
-        } catch (e) {
-          log(`  ${cat.name}: ERROR — ${e.message}`);
-        }
-        if (result.count > 0) break;
-        if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
-      }
-      log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+      const scraped = scrapeWithRetries(cat);
+      result = scraped.result;
+      if (scraped.blocked) blocked = true;
     }
 
     // Fill publish times the UI does not render, using the API's timestamps.
@@ -708,7 +748,7 @@ async function main() {
   log(`Total: ${totalCards} cards across ${CATEGORIES.length} categories`);
 
   if (totalCards === 0) {
-    log("ERROR: No cards scraped. Check Chrome and Perplexity availability.");
+    log(noCardsMessage(blocked));
     process.exit(1);
   }
 
@@ -752,4 +792,9 @@ module.exports = {
   relativeTime,
   normalizeTitle,
   apiCard,
+  isChallengeTitle,
+  apiGet,
+  fetchFeedItems,
+  scrapeWithRetries,
+  noCardsMessage,
 };
