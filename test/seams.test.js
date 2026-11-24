@@ -223,6 +223,7 @@ test("collectDigest backfills missing publish times of scraped cards from the AP
     { title: "repeated STORY", published_timestamp: hoursAgo(5) },
     { title: "Echo story" },
     { title: "Echo story", published_timestamp: hoursAgo(6) },
+    { title: "Echo story" },
     { title: "Business story", published_timestamp: hoursAgo(7) },
   ];
   const scrapedCards = {
@@ -233,6 +234,7 @@ test("collectDigest backfills missing publish times of scraped cards from the AP
       { headline: "Not in the feed", published: null },
       { headline: "", published: null },
       { headline: "Repeated story", published: null },
+      { headline: "Echo story", published: null },
     ],
     finance: [{ headline: "Business story", published: null }],
   };
@@ -248,13 +250,13 @@ test("collectDigest backfills missing publish times of scraped cards from the AP
   });
 
   const published = (id) => allData[id].cards.map((card) => card.published);
-  // A headline repeated in the feed takes the time of its last feed item.
-  assert.deepEqual(published("tech"), ["2 hours ago", "1 hour ago", null, null, null, "5 hours ago"]);
+  // Backfill takes the first dated duplicate, even when a later item is undated.
+  assert.deepEqual(published("tech"), ["2 hours ago", "1 hour ago", null, null, null, "4 hours ago", "6 hours ago"]);
   assert.deepEqual(published("finance"), ["7 hours ago"]);
   // Top shows the API cards as they are: one without a time stays without.
-  assert.deepEqual(published("top"), ["2 hours ago", "3 hours ago", null, "4 hours ago", "5 hours ago", null, "6 hours ago", "7 hours ago"]);
+  assert.deepEqual(published("top"), ["2 hours ago", "3 hours ago", null, "4 hours ago", "5 hours ago", null, "6 hours ago", null, "7 hours ago"]);
   assert.deepEqual(logs.filter((message) => message.includes("from API")), [
-    "  Tech & Science: +2 publish time(s) from API",
+    "  Tech & Science: +3 publish time(s) from API",
     "  Business: +1 publish time(s) from API",
   ]);
 });

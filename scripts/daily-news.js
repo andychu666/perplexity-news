@@ -810,13 +810,12 @@ function collectDigest({
     if (e.botChallenge) blocked = true;
     logFn(`API unavailable (${e.message}); relying on UI scraping`);
   }
-  // Key on the same headline apiCard() uses, and skip empty ones so blank
-  // headlines cannot collide on "".
+  // Index the first dated card for each nonempty normalized headline.
   const apiCards = feedItems.map(apiCard);
   const apiByTitle = new Map();
   for (const card of apiCards) {
     const key = card ? normalizeTitle(card.headline) : "";
-    if (key) apiByTitle.set(key, card);
+    if (key && card.published && !apiByTitle.has(key)) apiByTitle.set(key, card);
   }
 
   const topCards = selectTopApiCards(apiCards);
