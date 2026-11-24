@@ -270,15 +270,19 @@ const CHALLENGE_WAIT_MS = 30000;
 // The API call needs a tab on perplexity.ai that is past the interstitial.
 // browser-eval fails while the challenge reloads the page, so a failed read
 // counts as "still waiting".
-function openDiscoverTab() {
-  execFileSync(NAV, [`${ORIGIN}/discover/top`], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
+function openDiscoverTab({
+  nav = (url) => execFileSync(NAV, [url], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" }),
+  title: readTitle = pageTitle,
+  sleep = sleepSync,
+} = {}) {
+  nav(`${ORIGIN}/discover/top`);
   let title = "";
   for (let waited = 0; waited <= CHALLENGE_WAIT_MS; waited += 1000) {
     try {
-      title = pageTitle();
+      title = readTitle();
       if (!isChallengeTitle(title)) return;
     } catch { /* page is reloading */ }
-    sleepSync(1000);
+    sleep(1000);
   }
   throw botChallengeError(`page is a Cloudflare interstitial (title "${title}")`);
 }
@@ -610,19 +614,46 @@ function clearStaleLocks(dir, { hostname = os.hostname(), isAlive = isProcessAli
   }
 }
 
-function ensureChrome() {
-  // Already running?
-  try {
-    const version = execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    // Not closed here: another tool may own it. Without it, the next run
-    // starts a headed Chrome (see below).
-    if (/HeadlessChrome/.test(version)) {
-      log("Warning: the Chrome on the CDP port is headless, and Cloudflare challenges headless Chrome. Close it to let the next run start a headed one.");
-    }
-    return;
-  } catch { /* not running */ }
+const XVFB_RUN = "/usr/bin/xvfb-run";
 
-  // Find Chrome binary
+function cdpPort(url) {
+  return new URL(url).port || "9222";
+}
+
+function headlessWarning(versionText) {
+  if (/HeadlessChrome/.test(versionText)) {
+    return "Warning: the Chrome on the CDP port is headless, and Cloudflare challenges headless Chrome. Close it to let the next run start a headed one.";
+  }
+  return null;
+}
+
+function chromeCommand({ chromeBin, port, userDataDir, hasXvfb }) {
+  const chromeArgs = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+  ];
+  if (hasXvfb) {
+    return {
+      cmd: XVFB_RUN,
+      args: ["-a", "-s", "-screen 0 1280x900x24", chromeBin, "--ozone-platform=x11", ...chromeArgs],
+    };
+  }
+  return { cmd: chromeBin, args: [...chromeArgs, "--headless=new"] };
+}
+
+function prepareChromeLaunch({
+  cdpUrl = CDP_URL,
+  userDataDir: profileDir,
+  access = fs.accessSync,
+  mkdir = fs.mkdirSync,
+  clearLocks = clearStaleLocks,
+  logFn = log,
+} = {}) {
   const candidates = [
     "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
@@ -633,46 +664,51 @@ function ensureChrome() {
   let chromeBin = null;
   for (const c of candidates) {
     try {
-      fs.accessSync(c, fs.constants.X_OK);
+      access(c, fs.constants.X_OK);
       chromeBin = c;
       break;
     } catch { /* not found */ }
   }
   if (!chromeBin) {
-    log("ERROR: No Chrome/Chromium binary found. Tried: " + candidates.join(", "));
-    process.exit(1);
+    logFn("ERROR: No Chrome/Chromium binary found. Tried: " + candidates.join(", "));
+    return null;
   }
 
-  const userDataDir = path.join(os.homedir(), ".cache", "browser-tools");
-  fs.mkdirSync(userDataDir, { recursive: true });
-  clearStaleLocks(userDataDir);
+  const userDataDir = profileDir ?? path.join(os.homedir(), ".cache", "browser-tools");
+  mkdir(userDataDir, { recursive: true });
+  clearLocks(userDataDir);
 
-  const port = new URL(CDP_URL).port || "9222";
-  const chromeArgs = [
-    // Follow the configured CDP endpoint instead of assuming the default port.
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${userDataDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--no-sandbox",
-  ];
+  const port = cdpPort(cdpUrl);
   // Cloudflare challenges headless Chrome but lets a headed one through, so
   // run headed inside a virtual X display: no window on the desktop, and no
   // login session needed.
-  const XVFB_RUN = "/usr/bin/xvfb-run";
-  let cmd = XVFB_RUN;
-  let args = ["-a", "-s", "-screen 0 1280x900x24", chromeBin, "--ozone-platform=x11", ...chromeArgs];
+  let hasXvfb = true;
   try {
-    fs.accessSync(XVFB_RUN, fs.constants.X_OK);
+    access(XVFB_RUN, fs.constants.X_OK);
   } catch {
-    log(`Warning: ${XVFB_RUN} not found; starting headless Chrome, which Cloudflare may challenge (install xvfb)`);
-    cmd = chromeBin;
-    args = [...chromeArgs, "--headless=new"];
+    logFn(`Warning: ${XVFB_RUN} not found; starting headless Chrome, which Cloudflare may challenge (install xvfb)`);
+    hasXvfb = false;
   }
 
-  log(`Starting Chrome (${chromeBin}${cmd === XVFB_RUN ? " under xvfb-run" : ", headless"})...`);
+  const { cmd, args } = chromeCommand({ chromeBin, port, userDataDir, hasXvfb });
+  logFn(`Starting Chrome (${chromeBin}${cmd === XVFB_RUN ? " under xvfb-run" : ", headless"})...`);
+  return { cmd, args, port };
+}
+
+function ensureChrome() {
+  // Already running?
+  try {
+    const version = execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    // Not closed here: another tool may own it. Without it, the next run
+    // starts a headed Chrome (see below).
+    const warning = headlessWarning(version);
+    if (warning) log(warning);
+    return;
+  } catch { /* not running */ }
+
+  const launch = prepareChromeLaunch();
+  if (!launch) process.exit(1);
+  const { cmd, args, port } = launch;
   const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
   child.unref();
   let firstError = null;
@@ -728,28 +764,23 @@ function scrapeWithRetries(cat, { scrape = scrapeCategory, sleep = sleepSync, lo
   return { result, attempts, blocked };
 }
 
-// ── Main ────────────────────────────────────────────────────────────
-async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const today = new Date().toISOString().split("T")[0];
-
-  log(`Perplexity News Digest — ${today}`);
-  log(`Output dir: ${opts.out}`);
-  log(`Cards per category: ${opts.limit}`);
-
-  // Ensure Chrome is running with remote debugging
-  ensureChrome();
-
+// ── Digest collection ───────────────────────────────────────────────
+function collectDigest({
+  openTab = openDiscoverTab,
+  fetchFeed = fetchFeedItems,
+  scrape = scrapeWithRetries,
+  logFn = log,
+} = {}) {
   // API first: one call carries exact publish times and needs no rendering.
   let feedItems = [];
   let blocked = false;
   try {
-    openDiscoverTab();
-    feedItems = fetchFeedItems();
-    log(`API: ${feedItems.length} feed item(s) with publish times`);
+    openTab();
+    feedItems = fetchFeed();
+    logFn(`API: ${feedItems.length} feed item(s) with publish times`);
   } catch (e) {
     if (e.botChallenge) blocked = true;
-    log(`API unavailable (${e.message}); relying on UI scraping`);
+    logFn(`API unavailable (${e.message}); relying on UI scraping`);
   }
   // Key on the same headline apiCard() uses, and skip empty ones so blank
   // headlines cannot collide on "".
@@ -771,9 +802,9 @@ async function main() {
     if (cat.id === "top" && topCards.length > 0) {
       result = { count: topCards.length, cards: topCards };
       servedByApi = true;
-      log(`  ${cat.name}: ${topCards.length} cards (API)`);
+      logFn(`  ${cat.name}: ${topCards.length} cards (API)`);
     } else {
-      const scraped = scrapeWithRetries(cat);
+      const scraped = scrape(cat);
       result = scraped.result;
       if (scraped.blocked) blocked = true;
     }
@@ -791,11 +822,35 @@ async function main() {
           filled++;
         }
       }
-      if (filled > 0) log(`  ${cat.name}: +${filled} publish time(s) from API`);
+      if (filled > 0) logFn(`  ${cat.name}: +${filled} publish time(s) from API`);
     }
 
     allData[cat.id] = result;
   }
+
+  return { allData, blocked };
+}
+
+function openDigest(outPath, { exec = execFileSync, logFn = log } = {}) {
+  try {
+    exec("xdg-open", [outPath], { stdio: "ignore" });
+    logFn("Opened in browser");
+  } catch (e) {
+    logFn(`Warning: could not open the digest (${e.message})`);
+  }
+}
+
+// ── Main ────────────────────────────────────────────────────────────
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const today = new Date().toISOString().split("T")[0];
+
+  log(`Perplexity News Digest — ${today}`);
+  log(`Output dir: ${opts.out}`);
+  log(`Cards per category: ${opts.limit}`);
+
+  ensureChrome();
+  const { allData, blocked } = collectDigest();
 
   const totalCards = CATEGORIES.reduce((sum, c) => sum + (allData[c.id]?.count || 0), 0);
   log(`Total: ${totalCards} cards across ${CATEGORIES.length} categories`);
@@ -815,12 +870,7 @@ async function main() {
   log(`✅ Saved: ${outPath} (${kb} KB)`);
 
   if (opts.open) {
-    try {
-      execFileSync("xdg-open", [outPath], { stdio: "ignore" });
-      log("Opened in browser");
-    } catch (e) {
-      log(`Warning: could not open the digest (${e.message})`);
-    }
+    openDigest(outPath);
   }
 }
 
@@ -846,7 +896,14 @@ module.exports = {
   cardHtml,
   isChallengeTitle,
   apiGet,
+  openDiscoverTab,
   fetchFeedItems,
   scrapeWithRetries,
   noCardsMessage,
+  collectDigest,
+  openDigest,
+  cdpPort,
+  headlessWarning,
+  chromeCommand,
+  prepareChromeLaunch,
 };
