@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 // Mutation runner for the guards that PR #29 adds or changes in
-// scripts/daily-news.js (`git diff origin/main...HEAD`), and for every guard
-// in the functions the PR adds.
+// scripts/daily-news.js (`git diff origin/main...HEAD`), for every guard in
+// the functions the PR adds, and for the review items that point at lines
+// main already had (each such group says so).
 //
 //   node test/mutants/run-mutants             # every mutant
 //   node test/mutants/run-mutants apiGet      # one function's mutants only
@@ -22,16 +23,16 @@ const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const PINNED = "6298fba1a23a48c9c672765486d1fe52783c7615";
+const PINNED = "97501865fe16113e2d355478ce73bf03e791bbe6";
 const ROOT = path.resolve(__dirname, "..", "..");
 const REL = "scripts/daily-news.js";
 const TARGET = path.join(ROOT, REL);
 const TIMEOUT_MS = 60000; // per mutant; a hang counts as "killed (timeout)"
 
 // ── Survivors that only a code change can make testable ─────────────
-const NEEDS_CODE = {
-  ensureChrome: "needs code: ensureChrome — its probe redirect (L701), headless-warning guard (L705) and missing-Chrome exit (L710) run only inside main() after parseArgs, and no test may reach ensureChrome: it runs curl and starts Chrome — export ensureChrome({ probe, prepare, exit, logFn }) with defaults (the curl execFileSync, prepareChromeLaunch, process.exit, log), as openDiscoverTab does",
-};
+// None at this head. A survivor no test can reach gets { needs: "<symbol>" }
+// and an entry here: "needs code: <symbol> — <why> — <smallest seam>".
+const NEEDS_CODE = {};
 
 // ── Mutants ─────────────────────────────────────────────────────────
 // add(line, mutation, from, to, note): `from` must start on `line`; the first
@@ -41,7 +42,6 @@ const MUTANTS = [];
 let fn = "";
 let groupNote;
 const eq = (reason) => ({ eq: reason });
-const needs = (symbol) => ({ needs: symbol });
 
 function group(name, note) {
   fn = name;
@@ -67,6 +67,11 @@ function enoentCatch(line) {
   add(line, "catch narrowed to ENOENT (others rethrown)", 'if (e.code !== "ENOENT") logFn(', 'if (e.code !== "ENOENT") throw e; if (false) logFn(');
 }
 
+// The constant is as on main; the review (T-n11) asked for the timeouts.
+group("EVAL_TIMEOUT_MS");
+add(25, "constant 15000 → 14999", "EVAL_TIMEOUT_MS = 15000", "EVAL_TIMEOUT_MS = 14999");
+add(25, "constant 15000 → 15001", "EVAL_TIMEOUT_MS = 15000", "EVAL_TIMEOUT_MS = 15001");
+
 group("parseArgs");
 add(57, '`?? ""` fallback removed', 'argv[++i] ?? ""', "argv[++i]");
 cond(58, "!suffix || /[^A-Za-z0-9_-]/.test(suffix)");
@@ -75,14 +80,15 @@ add(58, "regex operand deleted", " || /[^A-Za-z0-9_-]/.test(suffix)", "");
 add(58, "any → all (`||` → `&&`)", "!suffix || /", "!suffix && /");
 add(58, "regex forced to always match", "/[^A-Za-z0-9_-]/", "/(?:)/");
 add(58, "regex forced to never match", "/[^A-Za-z0-9_-]/", "/(?!)/");
-// The regex has no ^/$ anchors: [^…] is a negated class.
+// The regex has no ^/$ anchors: [^…] is a negated class. Each allowed
+// character range is dropped once (T-n10: uppercase).
+add(58, "class member `A-Z` dropped", "/[^A-Za-z0-9_-]/", "/[^a-z0-9_-]/");
+add(58, "class member `a-z` dropped", "/[^A-Za-z0-9_-]/", "/[^A-Z0-9_-]/");
+add(58, "class member `0-9` dropped", "/[^A-Za-z0-9_-]/", "/[^A-Za-z_-]/");
+add(58, "class member `_` dropped", "/[^A-Za-z0-9_-]/", "/[^A-Za-z0-9-]/");
+add(58, "class member `-` dropped", "/[^A-Za-z0-9_-]/", "/[^A-Za-z0-9_]/");
 add(60, "exit code 1 → 0", "process.exit(1)", "process.exit(0)");
 add(60, "exit code 1 → 2", "process.exit(1)", "process.exit(2)");
-
-group("sleepSync");
-add(80, "clamp removed", "Math.max(0, ms)", "ms", eq("Atomics.wait clamps a negative timeout to 0 itself (ECMA-262 Atomics.wait: t = max(q, 0)), and every caller passes ≥ 500 ms"));
-add(80, "clamp bound 0 → 1", "Math.max(0, ms)", "Math.max(1, ms)", eq("every caller passes ≥ 500 ms (RETRY_DELAY_MS, HYDRATION_INITIAL_WAIT_MS, HYDRATION_POLL_MS, 1000, 500), so max(1, ms) = ms"));
-add(80, "clamp bound 0 → −1", "Math.max(0, ms)", "Math.max(-1, ms)", eq("Atomics.wait clamps a negative timeout to 0, the same wait as max(0, ms)"));
 
 // These lines changed only from var to let/const; the guards are as on main.
 group("parseCardFromLeaves");
@@ -126,388 +132,481 @@ add(177, "condition negated", "return blocked", "return !blocked");
 add(177, "condition True", "return blocked", "return true");
 add(177, "condition False", "return blocked", "return false");
 
+group("pageTitle");
+add(183, "`.trim()` removed", 'encoding: "utf8" }).trim();', 'encoding: "utf8" });');
+
 // Reached through scrapeWithRetries' default `scrape`, in a child process
 // whose child_process module is replaced (test/fake-browser.test.js).
 group("scrapeCategory");
+// catPath is as on main; the review (T-n11) asked for the count selector.
+add(194, "catPath trailing `/` dropped", "`/discover/${cat.id}/`", "`/discover/${cat.id}`");
+add(196, 'nav redirect `stdio: "pipe"` removed', ', stdio: "pipe" }', " }");
 cond(208, "cardCount === 0");
 add(208, "constant 0 → 1", "cardCount === 0", "cardCount === 1");
 add(208, "constant 0 → −1", "cardCount === 0", "cardCount === -1");
 cond(210, "isChallengeTitle(title)");
-cond(250, "match", { True: eq("with no match, match[1] throws inside the inner try, and its catch falls through to the same empty result") });
-add(251, "catch emptied (rethrows)", "catch { /* truncated output */ }", "catch (e) { throw e; }");
+// The extraction script is as on main; these three (T-n11) show that the
+// VM test runs it: a lost injection, a syntax error, an uncalled function.
+add(219, "extractJS: parseCardFromLeaves not injected", "${parseCardFromLeaves.toString()}", "${parseCardFromLeaves.name}");
+add(238, "extractJS: syntax error", "cards: cards });", "cards: cards };");
+add(239, "extractJS: function not called", "})()`;", "})`;");
+cond(251, "match", { True: eq("with no match, match[1] throws inside the inner try, and its catch leaves result undefined, which the shape check turns into the same empty result") });
+add(252, "catch emptied (rethrows)", "catch { /* truncated output */ }", "catch (e) { throw e; }");
+const shapeOk = "Number.isInteger(result?.count) && result.count >= 0 && Array.isArray(result.cards)";
+add(255, "shape check negated", `return ${shapeOk}`, `return !(${shapeOk})`);
+add(255, "shape check True", `return ${shapeOk}`, "return true");
+add(255, "shape check False", `return ${shapeOk}`, "return false");
+add(255, "`isInteger` operand deleted", "Number.isInteger(result?.count) && ", "");
+add(255, "`>= 0` operand deleted", "result.count >= 0 && ", "");
+add(255, "`isArray` operand deleted", " && Array.isArray(result.cards)", "");
+add(255, "all → any (first `&&` → `||`)", "?.count) && result", "?.count) || result");
+add(255, "all → any (second `&&` → `||`)", ">= 0 && Array", ">= 0 || Array");
+add(255, "`>=` → `>`", "result.count >= 0", "result.count > 0");
+add(255, "constant 0 → 1", "result.count >= 0", "result.count >= 1");
+add(255, "constant 0 → −1", "result.count >= 0", "result.count >= -1");
+add(255, "optional chaining `?.` removed", "result?.count", "result.count");
+
+// The line is as on main; the review (T-n10) asked for its default.
+group("CDP_URL");
+add(265, "`||` fallback removed", ' || "http://127.0.0.1:9222"', ""); // gitleaks:allow (IPv4 loopback)
+add(265, "port 9222 → 9221", '127.0.0.1:9222"', '127.0.0.1:9221"'); // gitleaks:allow (IPv4 loopback)
+add(265, "port 9222 → 9223", '127.0.0.1:9222"', '127.0.0.1:9223"'); // gitleaks:allow (IPv4 loopback)
 
 // The defaults are reached through collectDigest's defaults, in a child
 // process with a fake browser (test/fake-browser.test.js).
 group("openDiscoverTab");
-add(268, "constant 30000 → 29999", "CHALLENGE_WAIT_MS = 30000", "CHALLENGE_WAIT_MS = 29999");
-add(268, "constant 30000 → 30001", "CHALLENGE_WAIT_MS = 30000", "CHALLENGE_WAIT_MS = 30001", eq("waited only takes multiples of 1000, so `<= 30001` admits the same 31 polls as `<= 30000`"));
-add(274, "default `nav = …` removed", 'nav = (url) => execFileSync(NAV, [url], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" })', "nav");
-add(274, 'redirect `stdio: "pipe"` removed', ', stdio: "pipe" }', " }");
-add(275, "default `title: readTitle = pageTitle` removed", "title: readTitle = pageTitle", "title: readTitle");
-add(276, "default `sleep = sleepSync` removed", "sleep = sleepSync", "sleep");
-add(277, "default `= {}` removed", "} = {}) {", "}) {");
-add(279, "reset removed (`let title;`)", 'let title = "";', "let title;");
-add(280, "`<=` → `<`", "waited <= CHALLENGE_WAIT_MS", "waited < CHALLENGE_WAIT_MS");
-add(280, "start 0 → 1", "let waited = 0;", "let waited = 1;");
-add(280, "start 0 → −1", "let waited = 0;", "let waited = -1;", eq("−1, 999, …, 29999 is also 31 polls, and waited is read only by the loop bound"));
-add(280, "step 1000 → 999", "waited += 1000", "waited += 999", eq("0, 999, …, 29970 is also 31 polls, and waited is read only by the loop bound"));
-add(280, "step 1000 → 1001", "waited += 1000", "waited += 1001");
-add(280, "loop cut to its first element", "waited <= CHALLENGE_WAIT_MS;", "waited <= 0;");
-add(280, "loop exits early", "waited += 1000) {", "waited += 1000) { break;");
+add(270, "constant 30000 → 29999", "CHALLENGE_WAIT_MS = 30000", "CHALLENGE_WAIT_MS = 29999");
+add(270, "constant 30000 → 30001", "CHALLENGE_WAIT_MS = 30000", "CHALLENGE_WAIT_MS = 30001", eq("waited only takes multiples of 1000, so `<= 30001` admits the same 31 polls as `<= 30000`"));
+add(276, "default `nav = …` removed", 'nav = (url) => execFileSync(NAV, [url], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" })', "nav");
+add(276, 'redirect `stdio: "pipe"` removed', ', stdio: "pipe" }', " }");
+add(277, "default `title: readTitle = pageTitle` removed", "title: readTitle = pageTitle", "title: readTitle");
+add(278, "default `sleep = sleepSync` removed", "sleep = sleepSync", "sleep");
+add(279, "default `= {}` removed", "} = {}) {", "}) {");
+add(281, "reset false → true", "let readSucceeded = false;", "let readSucceeded = true;");
+add(284, "`<=` → `<`", "waited <= CHALLENGE_WAIT_MS", "waited < CHALLENGE_WAIT_MS");
+add(284, "start 0 → 1", "let waited = 0;", "let waited = 1;");
+add(284, "start 0 → −1", "let waited = 0;", "let waited = -1;", eq("−1, 999, …, 29999 is also 31 polls, and waited is read only by the loop bound"));
+add(284, "step 1000 → 999", "waited += 1000", "waited += 999", eq("0, 999, …, 29970 is also 31 polls, and waited is read only by the loop bound"));
+add(284, "step 1000 → 1001", "waited += 1000", "waited += 1001");
+add(284, "loop cut to its first element", "waited <= CHALLENGE_WAIT_MS;", "waited <= 0;");
+add(284, "loop exits early", "waited += 1000) {", "waited += 1000) { break;");
 // Not reversed: every poll is the same call, so order does not matter.
-cond(283, "!isChallengeTitle(title)");
-add(284, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
-add(285, "constant 1000 → 999", "sleep(1000)", "sleep(999)");
-add(285, "constant 1000 → 1001", "sleep(1000)", "sleep(1001)");
-
-group("cdpPort");
-add(620, '`|| "9222"` fallback removed', ' || "9222"', "");
-
-group("headlessWarning");
-cond(624, "/HeadlessChrome/.test(versionText)");
-add(624, "regex forced to always match", "/HeadlessChrome/", "/(?:)/");
-add(624, "regex forced to never match", "/HeadlessChrome/", "/(?!)/");
-// No ^/$ anchors.
-
-group("chromeCommand");
-cond(640, "hasXvfb");
-
-// The defaults are reached in a child process whose HOME is a temp dir and
-// whose fs.accessSync answers from a list (test/fake-browser.test.js).
-group("prepareChromeLaunch");
-add(650, "default `cdpUrl = CDP_URL` removed", "cdpUrl = CDP_URL", "cdpUrl");
-add(652, "default `access = fs.accessSync` removed", "access = fs.accessSync", "access");
-add(653, "default `mkdir = fs.mkdirSync` removed", "mkdir = fs.mkdirSync", "mkdir");
-add(654, "default `clearLocks = clearStaleLocks` removed", "clearLocks = clearStaleLocks", "clearLocks");
-add(655, "default `logFn = log` removed", "logFn = log", "logFn");
-add(656, "default `= {}` removed", "} = {}) {", "}) {");
-add(664, "reset removed (`let chromeBin;`)", "let chromeBin = null;", "let chromeBin;", eq("`!chromeBin` reads undefined as it reads null, and every other read of chromeBin follows a match that assigns it"));
-add(665, "loop cut to its first element", "of candidates)", "of candidates.slice(0, 1))");
-add(665, "loop exits early", "of candidates) {", "of candidates) { break;");
-add(665, "loop reversed", "of candidates)", "of candidates.slice().reverse())");
-add(667, "executable check deleted", "access(c, fs.constants.X_OK);", "");
-add(669, "first-match `break` deleted", "break;", "");
-add(670, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
-cond(672, "!chromeBin");
-add(677, "`??` fallback removed", ' ?? path.join(os.homedir(), ".cache", "browser-tools")', "");
-add(679, "stale-lock guard call deleted", "clearLocks(userDataDir);", "");
-add(685, "reset true → false", "let hasXvfb = true;", "let hasXvfb = false;");
-add(687, "xvfb-run check deleted", "access(XVFB_RUN, fs.constants.X_OK);", "");
-add(688, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
-add(690, "flag false → true", "hasXvfb = false;", "hasXvfb = true;");
-ternary(694, "cmd === XVFB_RUN");
-
-// Only the guards this PR adds to ensureChrome. Its probe catch, the spawn
-// options and the 60-try readiness loop (curl timeouts, redirect,
-// sleepSync(500)) keep origin/main's logic, so they are not mutated.
-group("ensureChrome", needs("ensureChrome"));
-add(701, 'redirect `stdio: ["ignore", "pipe", "ignore"]` removed', ', stdio: ["ignore", "pipe", "ignore"]', "");
-cond(705, "warning");
-cond(710, "!launch");
-add(710, "exit code 1 → 0", "process.exit(1)", "process.exit(0)");
-add(710, "exit code 1 → 2", "process.exit(1)", "process.exit(2)");
-
-// main() keeps only the write step; no guard there is added or changed by
-// this PR, so it has no mutants.
-group("collectDigest");
-add(769, "default `openTab = openDiscoverTab` removed", "openTab = openDiscoverTab", "openTab");
-add(770, "default `fetchFeed = fetchFeedItems` removed", "fetchFeed = fetchFeedItems", "fetchFeed");
-add(771, "default `scrape = scrapeWithRetries` removed", "scrape = scrapeWithRetries", "scrape");
-add(772, "default `logFn = log` removed", "logFn = log", "logFn");
-add(773, "default `= {}` removed", "} = {}) {", "}) {");
-add(775, "reset removed (`let feedItems;`)", "let feedItems = [];", "let feedItems;");
-add(776, "reset false → true", "let blocked = false;", "let blocked = true;");
-cond(782, "e.botChallenge");
-add(782, "flag true → false", "blocked = true;", "blocked = false;");
-add(789, "loop cut to its first element", "of apiCards)", "of apiCards.slice(0, 1))");
-add(789, "loop exits early", "of apiCards) {", "of apiCards) { break;");
-add(789, "loop reversed", "of apiCards)", "of apiCards.slice().reverse())");
-ternary(790, "card");
-cond(791, "key", { True: eq("an empty key is never read: the backfill skips empty keys before its lookup (L818)") });
-add(794, "guard call deleted", "selectTopApiCards(apiCards)", "apiCards");
-add(796, "loop cut to its first element", "of CATEGORIES)", "of CATEGORIES.slice(0, 1))");
-add(796, "loop exits early", "of CATEGORIES) {", "of CATEGORIES) { break;");
-add(796, "loop reversed", "of CATEGORIES)", "of CATEGORIES.slice().reverse())");
-add(797, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;", eq("both branches below assign result before anything reads it"));
-add(798, "reset false → true", "let servedByApi = false;", "let servedByApi = true;");
-cond(802, 'cat.id === "top" && topCards.length > 0');
-add(802, "`cat.id` operand deleted", 'cat.id === "top" && ', "");
-add(802, "`length` operand deleted", " && topCards.length > 0", "");
-add(802, "all → any (`&&` → `||`)", '"top" && topCards', '"top" || topCards');
-add(802, "`>` → `>=`", "topCards.length > 0", "topCards.length >= 0");
-add(802, "constant 0 → 1", "topCards.length > 0", "topCards.length > 1");
-add(802, "constant 0 → −1", "topCards.length > 0", "topCards.length > -1");
-add(804, "flag true → false", "servedByApi = true;", "servedByApi = false;");
-cond(809, "scraped.blocked");
-add(809, "flag true → false", "blocked = true;", "blocked = false;");
-// With an empty feed the backfill can fill nothing, so these differ only in
-// whether it reads result.cards at all.
-cond(814, "!servedByApi && feedItems.length > 0");
-add(814, "`servedByApi` operand deleted", "!servedByApi && ", "");
-add(814, "`length` operand deleted", " && feedItems.length > 0", "");
-add(814, "all → any (`&&` → `||`)", "!servedByApi && feedItems", "!servedByApi || feedItems");
-add(814, "`>` → `>=`", "feedItems.length > 0", "feedItems.length >= 0");
-add(814, "constant 0 → 1", "feedItems.length > 0", "feedItems.length > 1");
-add(814, "constant 0 → −1", "feedItems.length > 0", "feedItems.length > -1");
-add(815, "constant 0 → 1", "let filled = 0;", "let filled = 1;");
-add(815, "constant 0 → −1", "let filled = 0;", "let filled = -1;");
-add(816, "loop cut to its first element", "of result.cards)", "of result.cards.slice(0, 1))");
-add(816, "loop exits early", "of result.cards) {", "of result.cards) { break;");
-// Not reversed: each card is filled on its own, so order does not matter.
-cond(818, "!key || card.published");
-add(818, "`!key` operand deleted", "!key || ", "", eq("apiByTitle never holds an empty key (L791), so the lookup misses"));
-add(818, "`published` operand deleted", " || card.published", "");
-add(818, "any → all (`||` → `&&`)", "!key || card", "!key && card");
-cond(820, "hit && hit.published");
-add(820, "`hit` operand deleted", "hit && hit.published", "hit.published");
-add(820, "`published` operand deleted", " && hit.published", "");
-add(820, "all → any (`&&` → `||`)", "hit && hit.published", "hit || hit.published");
-cond(825, "filled > 0");
-add(825, "`>` → `>=`", "filled > 0", "filled >= 0");
-add(825, "constant 0 → 1", "filled > 0", "filled > 1");
-add(825, "constant 0 → −1", "filled > 0", "filled > -1");
-
-group("openDigest");
-add(834, "default `exec = execFileSync` removed", "exec = execFileSync", "exec");
-add(834, "default `logFn = log` removed", "logFn = log", "logFn");
-add(834, "default `= {}` removed", "} = {}) {", "}) {");
-add(836, 'redirect `{ stdio: "ignore" }` removed', ', { stdio: "ignore" }', "");
-add(838, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
+add(286, "`.trim()` removed", "readTitle().trim()", "readTitle()");
+add(287, "flag true → false", "readSucceeded = true;", "readSucceeded = false;");
+add(287, "flag assignment deleted", "readSucceeded = true;", "");
+cond(288, "title");
+cond(289, "!isChallengeTitle(title)");
+add(290, "challenge title not kept", "challengeTitle = title;", "");
+add(292, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
+add(293, "last error not kept", "lastError = e;", "");
+add(295, "constant 1000 → 999", "sleep(1000)", "sleep(999)");
+add(295, "constant 1000 → 1001", "sleep(1000)", "sleep(1001)");
+cond(297, "!readSucceeded");
+add(298, "optional chaining `?.` removed", "lastError?.message", "lastError.message");
+add(298, "`??` fallback removed", " ?? String(lastError)", "");
+cond(300, "challengeTitle");
 
 // The 64 MiB cap is not a guard; its removal is checked because a feed page
 // outgrows Node's 1 MiB default.
 group("browserEval");
-add(294, "maxBuffer option removed (1 MiB default)", ", maxBuffer: 64 * 1024 * 1024", "");
+add(310, "maxBuffer option removed (1 MiB default)", ", maxBuffer: 64 * 1024 * 1024", "");
 
 group("apiGet");
-add(297, "default `evalFn = browserEval` removed", "evalFn = browserEval", "evalFn");
-ternary(300, "r.ok"); // inside the in-page fetch script
-cond(303, "res.status < 200 || res.status >= 300");
-add(303, "`< 200` operand deleted", "res.status < 200 || ", "");
-add(303, "`>= 300` operand deleted", " || res.status >= 300", "");
-add(303, "any → all (`||` → `&&`)", "< 200 || res", "< 200 && res");
-add(303, "`<` → `<=`", "res.status < 200", "res.status <= 200");
-add(303, "constant 200 → 199", "res.status < 200", "res.status < 199");
-add(303, "constant 200 → 201", "res.status < 200", "res.status < 201");
-add(303, "`>=` → `>`", "res.status >= 300", "res.status > 300");
-add(303, "constant 300 → 299", "res.status >= 300", "res.status >= 299");
-add(303, "constant 300 → 301", "res.status >= 300", "res.status >= 301");
-cond(304, 'res.mitigated === "challenge"');
-ternary(305, "res.mitigated");
+add(313, "default `evalFn = browserEval` removed", "evalFn = browserEval", "evalFn");
+ternary(316, "r.ok"); // inside the in-page fetch script
+cond(319, "res.status < 200 || res.status >= 300");
+add(319, "`< 200` operand deleted", "res.status < 200 || ", "");
+add(319, "`>= 300` operand deleted", " || res.status >= 300", "");
+add(319, "any → all (`||` → `&&`)", "< 200 || res", "< 200 && res");
+add(319, "`<` → `<=`", "res.status < 200", "res.status <= 200");
+add(319, "constant 200 → 199", "res.status < 200", "res.status < 199");
+add(319, "constant 200 → 201", "res.status < 200", "res.status < 201");
+add(319, "`>=` → `>`", "res.status >= 300", "res.status > 300");
+add(319, "constant 300 → 299", "res.status >= 300", "res.status >= 299");
+add(319, "constant 300 → 301", "res.status >= 300", "res.status >= 301");
+cond(320, 'res.mitigated === "challenge"');
+ternary(321, "res.mitigated");
 
 group("relativeTime");
-add(312, "default `now = Date.now()` removed", "now = Date.now()", "now");
-add(316, "constant 60000 → 59999", "/ 60000", "/ 59999");
-add(316, "constant 60000 → 60001", "/ 60000", "/ 60001");
-cond(317, "minutes <= 0");
-add(317, "`<=` → `<`", "minutes <= 0", "minutes < 0");
-add(317, "constant 0 → 1", "minutes <= 0", "minutes <= 1");
-add(317, "constant 0 → −1", "minutes <= 0", "minutes <= -1");
-cond(318, "minutes < 60");
-add(318, "`<` → `<=`", "minutes < 60", "minutes <= 60");
-add(318, "constant 60 → 59", "minutes < 60", "minutes < 59");
-add(318, "constant 60 → 61", "minutes < 60", "minutes < 61");
-ternary(318, "minutes === 1");
-add(318, "constant 1 → 0", "minutes === 1", "minutes === 0");
-add(318, "constant 1 → 2", "minutes === 1", "minutes === 2");
-cond(320, "hours < 24");
-add(320, "`<` → `<=`", "hours < 24", "hours <= 24");
-add(320, "constant 24 → 23", "hours < 24", "hours < 23");
-add(320, "constant 24 → 25", "hours < 24", "hours < 25");
-ternary(320, "hours === 1");
-add(320, "constant 1 → 0", "hours === 1", "hours === 0");
-add(320, "constant 1 → 2", "hours === 1", "hours === 2");
-add(321, "constant 24 → 23", "hours / 24", "hours / 23");
-add(321, "constant 24 → 25", "hours / 24", "hours / 25");
-ternary(322, "days === 1");
-add(322, "constant 1 → 0", "days === 1", "days === 0");
-add(322, "constant 1 → 2", "days === 1", "days === 2");
+add(328, "default `now = Date.now()` removed", "now = Date.now()", "now");
+add(332, "constant 60000 → 59999", "/ 60000", "/ 59999");
+add(332, "constant 60000 → 60001", "/ 60000", "/ 60001");
+cond(333, "minutes <= 0");
+add(333, "`<=` → `<`", "minutes <= 0", "minutes < 0");
+add(333, "constant 0 → 1", "minutes <= 0", "minutes <= 1");
+add(333, "constant 0 → −1", "minutes <= 0", "minutes <= -1");
+cond(334, "minutes < 60");
+add(334, "`<` → `<=`", "minutes < 60", "minutes <= 60");
+add(334, "constant 60 → 59", "minutes < 60", "minutes < 59");
+add(334, "constant 60 → 61", "minutes < 60", "minutes < 61");
+ternary(334, "minutes === 1");
+add(334, "constant 1 → 0", "minutes === 1", "minutes === 0");
+add(334, "constant 1 → 2", "minutes === 1", "minutes === 2");
+cond(336, "hours < 24");
+add(336, "`<` → `<=`", "hours < 24", "hours <= 24");
+add(336, "constant 24 → 23", "hours < 24", "hours < 23");
+add(336, "constant 24 → 25", "hours < 24", "hours < 25");
+ternary(336, "hours === 1");
+add(336, "constant 1 → 0", "hours === 1", "hours === 0");
+add(336, "constant 1 → 2", "hours === 1", "hours === 2");
+add(337, "constant 24 → 23", "hours / 24", "hours / 23");
+add(337, "constant 24 → 25", "hours / 24", "hours / 25");
+ternary(338, "days === 1");
+add(338, "constant 1 → 0", "days === 1", "days === 0");
+add(338, "constant 1 → 2", "days === 1", "days === 2");
 
 group("apiCard");
 const hasCount = "preview.total_count !== null && preview.total_count !== undefined";
-cond(326, '!item || typeof item !== "object"');
-add(326, "`!item` operand deleted", "!item || ", "");
-add(326, "`typeof` operand deleted", ' || typeof item !== "object"', "");
-add(326, "any → all (`||` → `&&`)", "!item || typeof", "!item && typeof");
-add(332, "condition negated", hasCount, `!(${hasCount})`);
-add(332, "condition True", hasCount, "true");
-add(332, "condition False", hasCount, "false");
-add(332, "`!== null` operand deleted", "preview.total_count !== null && ", "");
-add(332, "`!== undefined` operand deleted", " && preview.total_count !== undefined", "");
-add(332, "all → any (`&&` → `||`)", "!== null && preview", "!== null || preview");
+cond(342, '!item || typeof item !== "object"');
+add(342, "`!item` operand deleted", "!item || ", "");
+add(342, "`typeof` operand deleted", ' || typeof item !== "object"', "");
+add(342, "any → all (`||` → `&&`)", "!item || typeof", "!item && typeof");
+add(348, "condition negated", hasCount, `!(${hasCount})`);
+add(348, "condition True", hasCount, "true");
+add(348, "condition False", hasCount, "false");
+add(348, "`!== null` operand deleted", "preview.total_count !== null && ", "");
+add(348, "`!== undefined` operand deleted", " && preview.total_count !== undefined", "");
+add(348, "all → any (`&&` → `||`)", "!== null && preview", "!== null || preview");
 
 group("selectTopApiCards");
 const usable = 'typeof card?.headline === "string" && card.headline.trim()';
-add(340, "predicate negated", usable, `!(${usable})`);
-add(340, "predicate True", usable, "true");
-add(340, "predicate False", usable, "false");
-add(340, "`typeof` operand deleted", 'typeof card?.headline === "string" && ', "");
-add(340, "`trim` operand deleted", " && card.headline.trim()", "");
-add(340, "all → any (`&&` → `||`)", '"string" && card', '"string" || card');
-add(340, "optional chaining `?.` removed", "card?.headline", "card.headline");
-add(340, "`.trim()` removed", "card.headline.trim()", "card.headline");
-add(340, "loop cut to its first element", "cards.filter(", "cards.slice(0, 1).filter(");
-add(340, "loop exits early", "cards.filter(", "[].filter(");
-add(340, "loop reversed", "cards.filter(", "cards.slice().reverse().filter(");
+add(356, "predicate negated", usable, `!(${usable})`);
+add(356, "predicate True", usable, "true");
+add(356, "predicate False", usable, "false");
+add(356, "`typeof` operand deleted", 'typeof card?.headline === "string" && ', "");
+add(356, "`trim` operand deleted", " && card.headline.trim()", "");
+add(356, "all → any (`&&` → `||`)", '"string" && card', '"string" || card');
+add(356, "optional chaining `?.` removed", "card?.headline", "card.headline");
+add(356, "`.trim()` removed", "card.headline.trim()", "card.headline");
+add(356, "loop cut to its first element", "cards.filter(", "cards.slice(0, 1).filter(");
+add(356, "loop exits early", "cards.filter(", "[].filter(");
+add(356, "loop reversed", "cards.filter(", "cards.slice().reverse().filter(");
 
 group("fetchFeedItems");
 const shape = "body && Array.isArray(body.items)";
 const isEntry = 'entry && typeof entry === "object"';
-add(343, "default `pages = 2` removed", "pages = 2", "pages");
-add(343, "default 2 → 1", "pages = 2", "pages = 1");
-add(343, "default 2 → 3", "pages = 2", "pages = 3");
-add(343, "default `perPage = 100` removed", "perPage = 100", "perPage");
-add(343, "default 100 → 99", "perPage = 100", "perPage = 99");
-add(343, "default 100 → 101", "perPage = 100", "perPage = 101");
-add(343, "default `get = apiGet` removed", "get = apiGet", "get");
-add(343, "default `= {}` removed", "} = {})", "})");
-add(345, "`<` → `<=`", "i < pages;", "i <= pages;");
-add(345, "bound − 1", "i < pages;", "i < pages - 1;");
-add(345, "bound + 1", "i < pages;", "i < pages + 1;");
-add(345, "start 0 → 1", "let i = 0;", "let i = 1;");
-add(345, "start 0 → −1", "let i = 0;", "let i = -1;");
-add(345, "loop cut to its first element", "i < pages;", "i < Math.min(1, pages);");
-add(345, "loop exits early", "i++) {", "i++) { break;");
-add(345, "loop reversed", "let i = 0; i < pages; i++", "let i = pages - 1; i >= 0; i--");
-add(352, "condition negated", "if (i === 0)", "if (!(i === 0))");
-add(352, "condition True (= catch emptied, every failure rethrown)", "if (i === 0)", "if (true)");
-add(352, "condition False (guard deleted)", "if (i === 0)", "if (false)");
-add(352, "constant 0 → 1", "i === 0", "i === 1");
-add(352, "constant 0 → −1", "i === 0", "i === -1");
-add(356, "condition negated", `${shape} ?`, `!(${shape}) ?`);
-add(356, "condition True (guard deleted)", `${shape} ?`, "true ?");
-add(356, "condition False", `${shape} ?`, "false ?");
-add(356, "`body` operand deleted", "body && Array", "Array");
-add(356, "`isArray` operand deleted", " && Array.isArray(body.items) ?", " ?");
-add(356, "all → any (`&&` → `||`)", "body && Array", "body || Array");
-add(357, "predicate negated", isEntry, `!(${isEntry})`);
-add(357, "predicate True", isEntry, "true");
-add(357, "predicate False", isEntry, "false");
-add(357, "`entry` operand deleted", "entry && typeof", "typeof");
-add(357, "`typeof` operand deleted", ' && typeof entry === "object"', "");
-add(357, "all → any (`&&` → `||`)", "entry && typeof", "entry || typeof");
-add(357, "loop cut to its first element", "batch.filter(", "batch.slice(0, 1).filter(");
-add(357, "loop exits early", "batch.filter(", "[].filter(");
-add(357, "loop reversed", "batch.filter(", "batch.slice().reverse().filter(");
+add(359, "default `pages = 2` removed", "pages = 2", "pages");
+add(359, "default 2 → 1", "pages = 2", "pages = 1");
+add(359, "default 2 → 3", "pages = 2", "pages = 3");
+add(359, "default `perPage = 100` removed", "perPage = 100", "perPage");
+add(359, "default 100 → 99", "perPage = 100", "perPage = 99");
+add(359, "default 100 → 101", "perPage = 100", "perPage = 101");
+add(359, "default `get = apiGet` removed", "get = apiGet", "get");
+add(359, "default `logFn = log` removed", "logFn = log", "logFn");
+add(359, "default `= {}` removed", "} = {})", "})");
+add(361, "`<` → `<=`", "i < pages;", "i <= pages;");
+add(361, "bound − 1", "i < pages;", "i < pages - 1;");
+add(361, "bound + 1", "i < pages;", "i < pages + 1;");
+add(361, "start 0 → 1", "let i = 0;", "let i = 1;");
+add(361, "start 0 → −1", "let i = 0;", "let i = -1;");
+add(361, "loop cut to its first element", "i < pages;", "i < Math.min(1, pages);");
+add(361, "loop exits early", "i++) {", "i++) { break;");
+add(361, "loop reversed", "let i = 0; i < pages; i++", "let i = pages - 1; i >= 0; i--");
+add(368, "condition negated", "if (i === 0)", "if (!(i === 0))");
+add(368, "condition True (= catch emptied, every failure rethrown)", "if (i === 0)", "if (true)");
+add(368, "condition False (guard deleted)", "if (i === 0)", "if (false)");
+add(368, "constant 0 → 1", "i === 0", "i === 1");
+add(368, "constant 0 → −1", "i === 0", "i === -1");
+add(369, "injected logger bypassed (`log(`)", "logFn(`API page", "log(`API page");
+add(372, "condition negated", `${shape} ?`, `!(${shape}) ?`);
+add(372, "condition True (guard deleted)", `${shape} ?`, "true ?");
+add(372, "condition False", `${shape} ?`, "false ?");
+add(372, "`body` operand deleted", "body && Array", "Array");
+add(372, "`isArray` operand deleted", " && Array.isArray(body.items) ?", " ?");
+add(372, "all → any (`&&` → `||`)", "body && Array", "body || Array");
+add(373, "predicate negated", isEntry, `!(${isEntry})`);
+add(373, "predicate True", isEntry, "true");
+add(373, "predicate False", isEntry, "false");
+add(373, "`entry` operand deleted", "entry && typeof", "typeof");
+add(373, "`typeof` operand deleted", ' && typeof entry === "object"', "");
+add(373, "all → any (`&&` → `||`)", "entry && typeof", "entry || typeof");
+add(373, "loop cut to its first element", "batch.filter(", "batch.slice(0, 1).filter(");
+add(373, "loop exits early", "batch.filter(", "[].filter(");
+add(373, "loop reversed", "batch.filter(", "batch.slice().reverse().filter(");
+// The short-page stop is as on main; the review (T-N2) asked for it.
+cond(374, "batch.length < perPage", {}, "short-page stop");
+add(374, "`<` → `<=`", "batch.length < perPage", "batch.length <= perPage");
+add(374, "bound − 1", "batch.length < perPage", "batch.length < perPage - 1");
 
 group("normalizeTitle");
-add(366, '`|| ""` fallback removed', 'String(text || "")', "String(text)");
-add(366, "regex forced to always match", String.raw`/[^\p{L}\p{N}]+/gu`, String.raw`/[\s\S]/gu`);
-add(366, "regex forced to never match", String.raw`/[^\p{L}\p{N}]+/gu`, "/(?!)/gu");
-// No ^/$ anchors.
+add(382, '`|| ""` fallback removed', 'String(text || "")', "String(text)");
+add(382, "regex forced to always match", String.raw`/[^\p{L}\p{N}]+/gu`, String.raw`/[\s\S]/gu`);
+add(382, "regex forced to never match", String.raw`/[^\p{L}\p{N}]+/gu`, "/(?!)/gu");
+// No ^/$ anchors. Each kept class is dropped once (T-n10: digits).
+add(382, "class member `\\p{L}` dropped", String.raw`/[^\p{L}\p{N}]+/gu`, String.raw`/[^\p{N}]+/gu`);
+add(382, "class member `\\p{N}` dropped", String.raw`/[^\p{L}\p{N}]+/gu`, String.raw`/[^\p{L}]+/gu`);
 
 group("safeUrl");
 const webProtocol = 'protocol === "http:" || protocol === "https:"';
-add(381, '`|| ""` fallback removed', 'String(value || "")', "String(value)", eq('every falsy value stringifies to a scheme-less string ("undefined", "null", "0", "false", "NaN"), which new URL() rejects, so the catch returns the same ""'));
-add(381, "`.trim()` removed", ".trim();", ";");
-cond(382, "!raw", { False: eq('new URL("") throws, and the catch returns the same ""') });
-add(385, "condition negated", `${webProtocol} ?`, `!(${webProtocol}) ?`);
-add(385, "condition True", `${webProtocol} ?`, "true ?");
-add(385, "condition False", `${webProtocol} ?`, "false ?");
-add(385, "`http:` operand deleted", 'protocol === "http:" || ', "");
-add(385, "`https:` operand deleted", ' || protocol === "https:"', "");
-add(385, "any → all (`||` → `&&`)", '"http:" || protocol', '"http:" && protocol');
-add(386, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+add(397, "`.trim()` removed", "String(value).trim();", "String(value);");
+add(400, "condition negated", `${webProtocol} ?`, `!(${webProtocol}) ?`);
+add(400, "condition True", `${webProtocol} ?`, "true ?");
+add(400, "condition False", `${webProtocol} ?`, "false ?");
+add(400, "`http:` operand deleted", 'protocol === "http:" || ', "");
+add(400, "`https:` operand deleted", ' || protocol === "https:"', "");
+add(400, "any → all (`||` → `&&`)", '"http:" || protocol', '"http:" && protocol');
+add(401, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
 
 group("cardHtml");
-add(393, '`|| "#"` fallback removed', 'safeUrl(card.href) || "#"', "safeUrl(card.href)");
-add(393, "safeUrl guard deleted", "safeUrl(card.href) || ", "card.href || ");
-add(394, "condition negated", "card.imgSrc ?", "!(card.imgSrc) ?");
-add(394, "condition True", "card.imgSrc ?", "true ?", eq('safeUrl() of a missing image returns "", the same as the else branch'));
-add(394, "condition False", "card.imgSrc ?", "false ?");
-add(394, "safeUrl guard deleted", "escapeHtml(safeUrl(card.imgSrc))", "escapeHtml(card.imgSrc)");
-add(396, "condition negated", "const sources = card.sources", "const sources = !(card.sources)");
-add(396, "condition True", "const sources = card.sources", "const sources = true");
-add(396, "condition False", "const sources = card.sources", "const sources = false");
-add(397, "escaping deleted", "escapeHtml(String(card.sources))", "String(card.sources)");
-ternary(397, 'String(card.sources) === "1"');
-add(397, 'constant "1" → "0"', '=== "1"', '=== "0"');
-add(397, 'constant "1" → "2"', '=== "1"', '=== "2"');
+add(408, '`|| "#"` fallback removed', 'safeUrl(card.href) || "#"', "safeUrl(card.href)");
+add(408, "safeUrl guard deleted", "safeUrl(card.href) || ", "card.href || ");
+add(409, "safeUrl guard deleted", "escapeHtml(safeUrl(card.imgSrc))", "escapeHtml(card.imgSrc)");
+add(411, "condition negated", "const sources = card.sources", "const sources = !(card.sources)");
+add(411, "condition True", "const sources = card.sources", "const sources = true");
+add(411, "condition False", "const sources = card.sources", "const sources = false");
+add(412, "escaping deleted", "escapeHtml(String(card.sources))", "String(card.sources)");
+ternary(412, 'String(card.sources) === "1"');
+add(412, 'constant "1" → "0"', '=== "1"', '=== "0"');
+add(412, 'constant "1" → "2"', '=== "1"', '=== "2"');
 
 // Reached through clearStaleLocks' default `isAlive`.
 group("isProcessAlive");
-add(562, "result True → False", "return true;", "return false;");
-add(565, "catch emptied (rethrows)", 'return e.code !== "ESRCH";', "throw e;");
-add(565, "catch narrowed to ESRCH (others rethrown)", 'return e.code !== "ESRCH";', 'if (e.code !== "ESRCH") throw e; return false;');
-add(565, "code check negated", 'e.code !== "ESRCH"', 'e.code === "ESRCH"');
-add(565, "code check True", 'e.code !== "ESRCH"', "true");
-add(565, "code check False", 'e.code !== "ESRCH"', "false");
+add(577, "result True → False", "return true;", "return false;");
+add(580, "catch emptied (rethrows)", 'return e.code !== "ESRCH";', "throw e;");
+add(580, "catch narrowed to ESRCH (others rethrown)", 'return e.code !== "ESRCH";', 'if (e.code !== "ESRCH") throw e; return false;');
+add(580, "code check negated", 'e.code !== "ESRCH"', 'e.code === "ESRCH"');
+add(580, "code check True", 'e.code !== "ESRCH"', "true");
+add(580, "code check False", 'e.code !== "ESRCH"', "false");
 
 group("clearStaleLocks");
 const malformed = "separator <= 0 || !/^[0-9]+$/.test(pidText) || pid <= 0 || pid > 0x7fffffff";
-add(569, "default `hostname = os.hostname()` removed", "hostname = os.hostname()", "hostname");
-add(569, "default `isAlive = isProcessAlive` removed", "isAlive = isProcessAlive", "isAlive");
-add(569, "default `logFn = log` removed", "logFn = log", "logFn");
-add(569, "default `= {}` removed", "} = {})", "})");
-enoentCatch(575);
-add(579, "scan reversed (`indexOf`)", 'lastIndexOf("-")', 'indexOf("-")');
-cond(583, malformed);
-add(583, "`separator` operand deleted", "separator <= 0 || ", "");
-add(583, "regex operand deleted", "!/^[0-9]+$/.test(pidText) || ", "");
-add(583, "`pid <= 0` operand deleted", "pid <= 0 || ", "");
-add(583, "`pid > max` operand deleted", " || pid > 0x7fffffff", "");
-add(583, "any → all (`||` → `&&`)", malformed, malformed.replaceAll(" || ", " && "));
-add(583, "`<=` → `<` (separator)", "separator <= 0", "separator < 0");
-add(583, "constant 0 → 1 (separator)", "separator <= 0", "separator <= 1");
-add(583, "constant 0 → −1 (separator)", "separator <= 0", "separator <= -1");
-add(583, "regex forced to always match", "/^[0-9]+$/", "/(?:)/");
-add(583, "regex forced to never match", "/^[0-9]+$/", "/(?!)/");
-add(583, "`^` anchor dropped", "/^[0-9]+$/", "/[0-9]+$/");
-add(583, "`$` anchor dropped", "/^[0-9]+$/", "/^[0-9]+/");
-add(583, "`<=` → `<` (pid)", "pid <= 0", "pid < 0");
-add(583, "constant 0 → 1 (pid)", "pid <= 0", "pid <= 1");
-add(583, "constant 0 → −1 (pid)", "pid <= 0", "pid <= -1");
-add(583, "`>` → `>=` (pid max)", "pid > 0x7fffffff", "pid >= 0x7fffffff");
-add(583, "constant max − 1", "pid > 0x7fffffff", "pid > 0x7ffffffe");
-add(583, "constant max + 1", "pid > 0x7fffffff", "pid > 0x80000000");
-cond(587, "lockHost !== hostname");
-cond(591, "isAlive(pid) !== false");
-add(591, "`!== false` → truthy test", "isAlive(pid) !== false", "isAlive(pid)");
-cond(599, "fs.readlinkSync(lockPath) !== target");
-enoentCatch(604);
-add(607, "loop cut to its first element", '["SingletonSocket", "SingletonCookie", "SingletonLock"]', '["SingletonSocket"]');
-add(607, "loop exits early", '"SingletonLock"]) {', '"SingletonLock"]) { break;');
-add(607, "loop reversed", '["SingletonSocket", "SingletonCookie", "SingletonLock"]', '["SingletonLock", "SingletonCookie", "SingletonSocket"]');
-enoentCatch(612);
+add(584, "default `hostname = os.hostname()` removed", "hostname = os.hostname()", "hostname");
+add(584, "default `isAlive = isProcessAlive` removed", "isAlive = isProcessAlive", "isAlive");
+add(584, "default `logFn = log` removed", "logFn = log", "logFn");
+add(584, "default `= {}` removed", "} = {})", "})");
+enoentCatch(590);
+add(594, "scan reversed (`indexOf`)", 'lastIndexOf("-")', 'indexOf("-")');
+cond(598, malformed);
+add(598, "`separator` operand deleted", "separator <= 0 || ", "");
+add(598, "regex operand deleted", "!/^[0-9]+$/.test(pidText) || ", "");
+add(598, "`pid <= 0` operand deleted", "pid <= 0 || ", "");
+add(598, "`pid > max` operand deleted", " || pid > 0x7fffffff", "");
+add(598, "any → all (`||` → `&&`)", malformed, malformed.replaceAll(" || ", " && "));
+add(598, "`<=` → `<` (separator)", "separator <= 0", "separator < 0");
+add(598, "constant 0 → 1 (separator)", "separator <= 0", "separator <= 1");
+add(598, "constant 0 → −1 (separator)", "separator <= 0", "separator <= -1");
+add(598, "regex forced to always match", "/^[0-9]+$/", "/(?:)/");
+add(598, "regex forced to never match", "/^[0-9]+$/", "/(?!)/");
+add(598, "`^` anchor dropped", "/^[0-9]+$/", "/[0-9]+$/");
+add(598, "`$` anchor dropped", "/^[0-9]+$/", "/^[0-9]+/");
+add(598, "`<=` → `<` (pid)", "pid <= 0", "pid < 0");
+add(598, "constant 0 → 1 (pid)", "pid <= 0", "pid <= 1");
+add(598, "constant 0 → −1 (pid)", "pid <= 0", "pid <= -1");
+add(598, "`>` → `>=` (pid max)", "pid > 0x7fffffff", "pid >= 0x7fffffff");
+add(598, "constant max − 1", "pid > 0x7fffffff", "pid > 0x7ffffffe");
+add(598, "constant max + 1", "pid > 0x7fffffff", "pid > 0x80000000");
+cond(602, "lockHost !== hostname");
+cond(606, "isAlive(pid) !== false");
+add(606, "`!== false` → truthy test", "isAlive(pid) !== false", "isAlive(pid)");
+cond(614, "fs.readlinkSync(lockPath) !== target");
+enoentCatch(619);
+add(622, "loop cut to its first element", '["SingletonSocket", "SingletonCookie", "SingletonLock"]', '["SingletonSocket"]');
+add(622, "loop exits early", '"SingletonLock"]) {', '"SingletonLock"]) { break;');
+add(622, "loop reversed", '["SingletonSocket", "SingletonCookie", "SingletonLock"]', '["SingletonLock", "SingletonCookie", "SingletonSocket"]');
+enoentCatch(627);
+
+group("cdpPort");
+cond(636, "port");
+cond(637, 'protocol === "http:"');
+add(637, 'constant "80" → "79"', 'return "80"', 'return "79"');
+add(637, 'constant "80" → "81"', 'return "80"', 'return "81"');
+cond(638, 'protocol === "https:"');
+add(638, 'constant "443" → "442"', 'return "443"', 'return "442"');
+add(638, 'constant "443" → "444"', 'return "443"', 'return "444"');
+add(639, 'constant "9222" → "9221"', 'return "9222"', 'return "9221"');
+add(639, 'constant "9222" → "9223"', 'return "9222"', 'return "9223"');
+
+group("headlessWarning");
+cond(643, "/HeadlessChrome/.test(versionText)");
+add(643, "regex forced to always match", "/HeadlessChrome/", "/(?:)/");
+add(643, "regex forced to never match", "/HeadlessChrome/", "/(?!)/");
+// No ^/$ anchors.
+
+group("chromeCommand");
+cond(659, "hasXvfb");
+
+// The defaults are reached in a child process whose HOME is a temp dir and
+// whose fs.accessSync answers from a list (test/fake-browser.test.js).
+group("prepareChromeLaunch");
+add(669, "default `cdpUrl = CDP_URL` removed", "cdpUrl = CDP_URL", "cdpUrl");
+add(671, "default `access = fs.accessSync` removed", "access = fs.accessSync", "access");
+add(672, "default `mkdir = fs.mkdirSync` removed", "mkdir = fs.mkdirSync", "mkdir");
+add(673, "default `clearLocks = clearStaleLocks` removed", "clearLocks = clearStaleLocks", "clearLocks");
+add(674, "default `logFn = log` removed", "logFn = log", "logFn");
+add(675, "default `= {}` removed", "} = {}) {", "}) {");
+add(683, "reset removed (`let chromeBin;`)", "let chromeBin = null;", "let chromeBin;", eq("`!chromeBin` reads undefined as it reads null, and every other read of chromeBin follows a match that assigns it"));
+add(684, "loop cut to its first element", "of candidates)", "of candidates.slice(0, 1))");
+add(684, "loop exits early", "of candidates) {", "of candidates) { break;");
+add(684, "loop reversed", "of candidates)", "of candidates.slice().reverse())");
+add(686, "executable check deleted", "access(c, fs.constants.X_OK);", "");
+add(688, "first-match `break` deleted", "break;", "");
+add(689, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+cond(691, "!chromeBin");
+add(696, "`??` fallback removed", ' ?? path.join(os.homedir(), ".cache", "browser-tools")', "");
+add(698, "stale-lock guard call deleted", "clearLocks(userDataDir, { logFn });", "");
+add(698, "logger not forwarded (`{ logFn }` removed)", "clearLocks(userDataDir, { logFn })", "clearLocks(userDataDir)");
+add(704, "reset true → false", "let hasXvfb = true;", "let hasXvfb = false;");
+add(706, "xvfb-run check deleted", "access(XVFB_RUN, fs.constants.X_OK);", "");
+add(707, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+add(709, "flag false → true", "hasXvfb = false;", "hasXvfb = true;");
+ternary(713, "cmd === XVFB_RUN");
+
+// Reached through main(), in a child process whose curl, spawn and browser
+// tools are fakes (test/fake-browser.test.js, "the CLI …"). The 60-try loop
+// bounds and its 6 s log keep main's logic, so they are not mutated.
+group("ensureChrome");
+add(720, 'probe redirect `stdio: ["ignore", "pipe", "ignore"]` removed', ', stdio: ["ignore", "pipe", "ignore"]', "");
+add(720, "probe --max-time 5 → 4", '"--max-time", "5"', '"--max-time", "4"');
+add(720, "probe --max-time 5 → 6", '"--max-time", "5"', '"--max-time", "6"');
+add(720, "probe --connect-timeout 3 → 2", '"--connect-timeout", "3"', '"--connect-timeout", "2"');
+add(720, "probe --connect-timeout 3 → 4", '"--connect-timeout", "3"', '"--connect-timeout", "4"');
+add(720, "probe timeout 8000 → 7999", "timeout: 8000, encoding", "timeout: 7999, encoding");
+add(720, "probe timeout 8000 → 8001", "timeout: 8000, encoding", "timeout: 8001, encoding");
+cond(724, "warning");
+add(725, "early return deleted (a running Chrome is started again)", "return;", "");
+add(726, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+cond(729, "!launch");
+add(729, "exit code 1 → 0", "process.exit(1)", "process.exit(0)");
+add(729, "exit code 1 → 2", "process.exit(1)", "process.exit(2)");
+add(731, 'spawn redirect `stdio: "ignore"` removed', ', stdio: "ignore" }', " }");
+add(731, "spawn detached true → false", "detached: true", "detached: false");
+add(733, "`await` removed (readiness polls before the spawn result)", "await new Promise", "new Promise");
+add(734, "spawn listener deleted", 'child.once("spawn", resolve);', "");
+add(735, "error listener deleted (listens to an unused event)", 'child.once("error", ', 'child.once("unused-error", ');
+add(736, "spawn-error log deleted", "log(`Warning: could not start Chrome (${error.message})`);", "");
+add(737, "error listener resolve() deleted", "resolve();", "");
+add(739, "unref() deleted", "child.unref();", "");
+add(744, 'readiness redirect `stdio: "ignore"` removed', ', stdio: "ignore" }', " }");
+add(744, "readiness --max-time 5 → 4", '"--max-time", "5"', '"--max-time", "4"');
+add(744, "readiness --max-time 5 → 6", '"--max-time", "5"', '"--max-time", "6"');
+add(744, "readiness --connect-timeout 3 → 2", '"--connect-timeout", "3"', '"--connect-timeout", "2"');
+add(744, "readiness --connect-timeout 3 → 4", '"--connect-timeout", "3"', '"--connect-timeout", "4"');
+add(744, "readiness timeout 8000 → 7999", "timeout: 8000, stdio", "timeout: 7999, stdio");
+add(744, "readiness timeout 8000 → 8001", "timeout: 8000, stdio", "timeout: 8001, stdio");
+add(745, "ready log port → main's fixed :9222", "log(`Chrome ready on :${port}`)", 'log("Chrome ready on :9222")');
+add(754, "constant 500 → 499", "sleepSync(500)", "sleepSync(499)");
+add(754, "constant 500 → 501", "sleepSync(500)", "sleepSync(501)");
 
 group("scrapeWithRetries");
-add(737, "constant 5000 → 4999", "RETRY_DELAY_MS = 5000", "RETRY_DELAY_MS = 4999");
-add(737, "constant 5000 → 5001", "RETRY_DELAY_MS = 5000", "RETRY_DELAY_MS = 5001");
-add(738, "constant 2 → 1", "RETRY_MAX = 2", "RETRY_MAX = 1");
-add(738, "constant 2 → 3", "RETRY_MAX = 2", "RETRY_MAX = 3");
-add(740, "default `scrape = scrapeCategory` removed", "scrape = scrapeCategory", "scrape");
-add(740, "default `sleep = sleepSync` removed", "sleep = sleepSync", "sleep");
-add(740, "default `logFn = log` removed", "logFn = log", "logFn");
-add(740, "default `= {}` removed", "} = {})", "})");
-add(741, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;");
-add(744, "`<=` → `<`", "attempt <= RETRY_MAX;", "attempt < RETRY_MAX;");
-add(744, "bound − 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX - 1;");
-add(744, "bound + 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX + 1;");
-add(744, "start 0 → 1", "let attempt = 0;", "let attempt = 1;");
-add(744, "start 0 → −1", "let attempt = 0;", "let attempt = -1;");
-add(744, "loop cut to its first element", "attempt <= RETRY_MAX;", "attempt <= 0;");
-add(744, "loop exits early", "attempt++) {", "attempt++) { break;");
-add(744, "loop reversed", "let attempt = 0; attempt <= RETRY_MAX; attempt++", "let attempt = RETRY_MAX; attempt >= 0; attempt--");
-cond(745, "attempt > 0");
-add(745, "`>` → `>=`", "attempt > 0", "attempt >= 0");
-add(745, "constant 0 → 1", "attempt > 0", "attempt > 1");
-add(745, "constant 0 → −1", "attempt > 0", "attempt > -1");
-add(752, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
-cond(754, "e.botChallenge");
-add(755, "flag true → false", "blocked = true;", "blocked = false;");
-add(757, "challenge stop removed (`break` deleted)", "break;", "");
-cond(760, "result.count > 0");
-add(760, "`>` → `>=`", "result.count > 0", "result.count >= 0");
-add(760, "constant 0 → 1", "result.count > 0", "result.count > 1");
-add(760, "constant 0 → −1", "result.count > 0", "result.count > -1");
-cond(761, "attempt < RETRY_MAX");
-add(761, "`<` → `<=`", "attempt < RETRY_MAX", "attempt <= RETRY_MAX");
-add(761, "bound − 1", "attempt < RETRY_MAX", "attempt < RETRY_MAX - 1");
-add(761, "bound + 1", "attempt < RETRY_MAX", "attempt < RETRY_MAX + 1");
-ternary(763, "attempts > 1");
-add(763, "`>` → `>=`", "attempts > 1", "attempts >= 1");
-add(763, "constant 1 → 0", "attempts > 1", "attempts > 0");
-add(763, "constant 1 → 2", "attempts > 1", "attempts > 2");
+add(764, "constant 5000 → 4999", "RETRY_DELAY_MS = 5000", "RETRY_DELAY_MS = 4999");
+add(764, "constant 5000 → 5001", "RETRY_DELAY_MS = 5000", "RETRY_DELAY_MS = 5001");
+add(765, "constant 2 → 1", "RETRY_MAX = 2", "RETRY_MAX = 1");
+add(765, "constant 2 → 3", "RETRY_MAX = 2", "RETRY_MAX = 3");
+add(767, "default `scrape = scrapeCategory` removed", "scrape = scrapeCategory", "scrape");
+add(767, "default `sleep = sleepSync` removed", "sleep = sleepSync", "sleep");
+add(767, "default `logFn = log` removed", "logFn = log", "logFn");
+add(767, "default `= {}` removed", "} = {})", "})");
+add(768, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;");
+add(771, "`<=` → `<`", "attempt <= RETRY_MAX;", "attempt < RETRY_MAX;");
+add(771, "bound − 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX - 1;");
+add(771, "bound + 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX + 1;");
+add(771, "start 0 → 1", "let attempt = 0;", "let attempt = 1;");
+add(771, "start 0 → −1", "let attempt = 0;", "let attempt = -1;");
+add(771, "loop cut to its first element", "attempt <= RETRY_MAX;", "attempt <= 0;");
+add(771, "loop exits early", "attempt++) {", "attempt++) { break;");
+add(771, "loop reversed", "let attempt = 0; attempt <= RETRY_MAX; attempt++", "let attempt = RETRY_MAX; attempt >= 0; attempt--");
+cond(772, "attempt > 0");
+add(772, "`>` → `>=`", "attempt > 0", "attempt >= 0");
+add(772, "constant 0 → 1", "attempt > 0", "attempt > 1");
+add(772, "constant 0 → −1", "attempt > 0", "attempt > -1");
+add(779, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
+cond(781, "e.botChallenge");
+add(782, "flag true → false", "blocked = true;", "blocked = false;");
+add(784, "challenge stop removed (`break` deleted)", "break;", "");
+cond(787, "result.count > 0");
+add(787, "`>` → `>=`", "result.count > 0", "result.count >= 0");
+add(787, "constant 0 → 1", "result.count > 0", "result.count > 1");
+add(787, "constant 0 → −1", "result.count > 0", "result.count > -1");
+cond(788, "attempt < RETRY_MAX");
+add(788, "`<` → `<=`", "attempt < RETRY_MAX", "attempt <= RETRY_MAX");
+add(788, "bound − 1", "attempt < RETRY_MAX", "attempt < RETRY_MAX - 1");
+add(788, "bound + 1", "attempt < RETRY_MAX", "attempt < RETRY_MAX + 1");
+ternary(790, "attempts > 1");
+add(790, "`>` → `>=`", "attempts > 1", "attempts >= 1");
+add(790, "constant 1 → 0", "attempts > 1", "attempts > 0");
+add(790, "constant 1 → 2", "attempts > 1", "attempts > 2");
+
+group("collectDigest");
+add(796, "default `openTab = openDiscoverTab` removed", "openTab = openDiscoverTab", "openTab");
+add(797, "default `fetchFeed = fetchFeedItems` removed", "fetchFeed = fetchFeedItems", "fetchFeed");
+add(798, "default `scrape = scrapeWithRetries` removed", "scrape = scrapeWithRetries", "scrape");
+add(799, "default `logFn = log` removed", "logFn = log", "logFn");
+add(800, "default `= {}` removed", "} = {}) {", "}) {");
+add(802, "reset removed (`let feedItems;`)", "let feedItems = [];", "let feedItems;");
+add(803, "reset false → true", "let blocked = false;", "let blocked = true;");
+add(806, "logger not forwarded (`fetchFeed()`)", "fetchFeed({ logFn })", "fetchFeed()");
+cond(809, "e.botChallenge");
+add(809, "flag true → false", "blocked = true;", "blocked = false;");
+add(815, "loop cut to its first element", "of apiCards)", "of apiCards.slice(0, 1))");
+add(815, "loop exits early", "of apiCards) {", "of apiCards) { break;");
+add(815, "loop reversed", "of apiCards)", "of apiCards.slice().reverse())");
+ternary(816, "card");
+const indexable = "key && card.published && !apiByTitle.has(key)";
+cond(817, indexable);
+add(817, "`key` operand deleted", "key && card.published", "card.published");
+add(817, "`published` operand deleted", "card.published && !apiByTitle", "!apiByTitle");
+add(817, "`!has` operand deleted (last dated item wins)", " && !apiByTitle.has(key)", "");
+add(817, "all → any (first `&&` → `||`)", "key && card.published", "key || card.published");
+add(817, "all → any (second `&&` → `||`)", "card.published && !apiByTitle", "card.published || !apiByTitle");
+add(820, "guard call deleted", "selectTopApiCards(apiCards)", "apiCards");
+add(822, "loop cut to its first element", "of CATEGORIES)", "of CATEGORIES.slice(0, 1))");
+add(822, "loop exits early", "of CATEGORIES) {", "of CATEGORIES) { break;");
+add(822, "loop reversed", "of CATEGORIES)", "of CATEGORIES.slice().reverse())");
+add(823, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;", eq("both branches below assign result before anything reads it"));
+add(824, "reset false → true", "let servedByApi = false;", "let servedByApi = true;");
+cond(828, 'cat.id === "top" && topCards.length > 0');
+add(828, "`cat.id` operand deleted", 'cat.id === "top" && ', "");
+add(828, "`length` operand deleted", " && topCards.length > 0", "");
+add(828, "all → any (`&&` → `||`)", '"top" && topCards', '"top" || topCards');
+add(828, "`>` → `>=`", "topCards.length > 0", "topCards.length >= 0");
+add(828, "constant 0 → 1", "topCards.length > 0", "topCards.length > 1");
+add(828, "constant 0 → −1", "topCards.length > 0", "topCards.length > -1");
+add(829, "Top count from the unfiltered feed (main's `feedItems.length`)", "count: topCards.length", "count: feedItems.length");
+add(829, "Top count 0", "count: topCards.length", "count: 0");
+add(830, "flag true → false", "servedByApi = true;", "servedByApi = false;");
+add(833, "logger not forwarded (`scrape(cat)`)", "scrape(cat, { logFn })", "scrape(cat)");
+cond(835, "scraped.blocked");
+add(835, "flag true → false", "blocked = true;", "blocked = false;");
+// With an empty feed the backfill can fill nothing, so these differ only in
+// whether it reads result.cards at all.
+cond(840, "!servedByApi && feedItems.length > 0");
+add(840, "`servedByApi` operand deleted", "!servedByApi && ", "");
+add(840, "`length` operand deleted", " && feedItems.length > 0", "");
+add(840, "all → any (`&&` → `||`)", "!servedByApi && feedItems", "!servedByApi || feedItems");
+add(840, "`>` → `>=`", "feedItems.length > 0", "feedItems.length >= 0");
+add(840, "constant 0 → 1", "feedItems.length > 0", "feedItems.length > 1");
+add(840, "constant 0 → −1", "feedItems.length > 0", "feedItems.length > -1");
+add(841, "constant 0 → 1", "let filled = 0;", "let filled = 1;");
+add(841, "constant 0 → −1", "let filled = 0;", "let filled = -1;");
+add(842, "loop cut to its first element", "of result.cards)", "of result.cards.slice(0, 1))");
+add(842, "loop exits early", "of result.cards) {", "of result.cards) { break;");
+// Not reversed: each card is filled on its own, so order does not matter.
+cond(844, "card.published");
+cond(846, "hit && hit.published");
+add(846, "`hit` operand deleted", "hit && hit.published", "hit.published");
+add(846, "`published` operand deleted", " && hit.published", "", eq("apiByTitle holds only cards with a publish time (L817), so every hit has one"));
+add(846, "all → any (`&&` → `||`)", "hit && hit.published", "hit || hit.published");
+cond(851, "filled > 0");
+add(851, "`>` → `>=`", "filled > 0", "filled >= 0");
+add(851, "constant 0 → 1", "filled > 0", "filled > 1");
+add(851, "constant 0 → −1", "filled > 0", "filled > -1");
+
+group("openDigest");
+add(860, "default `exec = execFileSync` removed", "exec = execFileSync", "exec");
+add(860, "default `logFn = log` removed", "logFn = log", "logFn");
+add(860, "default `= {}` removed", "} = {}) {", "}) {");
+add(862, 'redirect `{ stdio: "ignore" }` removed', ', { stdio: "ignore" }', "");
+add(864, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
+
+// Reached through the CLI in a child process (test/fake-browser.test.js).
+// `if (opts.open)` is as on main; the review (T-N2) asked for its call.
+group("main");
+add(878, "`await` removed (the digest runs before Chrome is ready)", "await ensureChrome();", "ensureChrome();");
+add(885, "blocked flag negated", "noCardsMessage(blocked)", "noCardsMessage(!blocked)");
+add(885, "blocked flag True", "noCardsMessage(blocked)", "noCardsMessage(true)");
+add(885, "blocked flag False", "noCardsMessage(blocked)", "noCardsMessage(false)");
+cond(898, "opts.open");
+add(899, "openDigest call deleted", "openDigest(outPath);", "");
 
 // ── Runner ──────────────────────────────────────────────────────────
 let shutdown = false;
