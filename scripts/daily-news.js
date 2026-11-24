@@ -549,6 +549,64 @@ ${sections}
 }
 
 // ── Chrome lifecycle ───────────────────────────────────────────────────
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM also means the process exists. Keep the lock if in doubt.
+    return e.code !== "ESRCH";
+  }
+}
+
+function clearStaleLocks(dir, { hostname = os.hostname(), isAlive = isProcessAlive, logFn = log } = {}) {
+  const lockPath = path.join(dir, "SingletonLock");
+  let target;
+  try {
+    target = fs.readlinkSync(lockPath);
+  } catch (e) {
+    if (e.code !== "ENOENT") logFn(`Keeping SingletonLock: cannot read symlink — ${e.message}`);
+    return;
+  }
+
+  const separator = target.lastIndexOf("-");
+  const lockHost = target.slice(0, separator);
+  const pidText = target.slice(separator + 1);
+  const pid = Number(pidText);
+  if (separator <= 0 || !/^[0-9]+$/.test(pidText) || pid <= 0 || pid > 0x7fffffff) {
+    logFn(`Keeping SingletonLock: malformed symlink target ${JSON.stringify(target)}`);
+    return;
+  }
+  if (lockHost !== hostname) {
+    logFn(`Keeping SingletonLock: profile belongs to host ${lockHost}`);
+    return;
+  }
+  if (isAlive(pid) !== false) {
+    logFn(`Keeping SingletonLock: PID ${pid} may still be running`);
+    return;
+  }
+
+  // Check for a new owner after probing the PID. Remove the ownership marker
+  // last so Chrome is less likely to claim the profile mid-cleanup.
+  try {
+    if (fs.readlinkSync(lockPath) !== target) {
+      logFn("Keeping SingletonLock: symlink target changed during cleanup");
+      return;
+    }
+  } catch (e) {
+    if (e.code !== "ENOENT") logFn(`Keeping SingletonLock: cannot recheck symlink — ${e.message}`);
+    return;
+  }
+  for (const entry of ["SingletonSocket", "SingletonCookie", "SingletonLock"]) {
+    try {
+      fs.unlinkSync(path.join(dir, entry));
+      logFn(`Removed stale ${entry}`);
+    } catch (e) {
+      if (e.code !== "ENOENT") logFn(`Warning: cannot remove ${entry} — ${e.message}`);
+    }
+  }
+}
+
 function ensureChrome() {
   // Already running?
   try {
@@ -584,25 +642,12 @@ function ensureChrome() {
 
   const userDataDir = path.join(os.homedir(), ".cache", "browser-tools");
   fs.mkdirSync(userDataDir, { recursive: true });
+  clearStaleLocks(userDataDir);
 
-  // Only clear locks that are actually stale: deleting them while a live Chrome
-  // owns the profile can corrupt it.
-  for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
-    const lockPath = path.join(userDataDir, lock);
-    try {
-      const age = Date.now() - fs.statSync(lockPath).mtimeMs;
-      if (age > 30000) {
-        fs.unlinkSync(lockPath);
-        log(`Removed stale ${lock} (${Math.round(age / 1000)}s old)`);
-      }
-    } catch (e) {
-      if (e.code !== "ENOENT") log(`Warning: cannot remove ${lock} \u2014 ${e.message}`);
-    }
-  }
-
+  const port = new URL(CDP_URL).port || "9222";
   const chromeArgs = [
     // Follow the configured CDP endpoint instead of assuming the default port.
-    `--remote-debugging-port=${new URL(CDP_URL).port || 9222}`,
+    `--remote-debugging-port=${port}`,
     `--user-data-dir=${userDataDir}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -631,7 +676,7 @@ function ensureChrome() {
   for (let i = 0; i < 60; i++) {
     try {
       execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, stdio: "ignore" });
-      log("Chrome ready on :9222");
+      log(`Chrome ready on :${port}`);
       return;
     } catch (e) {
       firstError ??= e;
@@ -786,6 +831,7 @@ if (require.main === module) {
 
 module.exports = {
   parseArgs,
+  clearStaleLocks,
   waitForHydratedCards,
   parseCardFromLeaves,
   // Pure helpers, exported so the node --test suite can cover their edge cases
