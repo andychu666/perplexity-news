@@ -37,3 +37,11 @@ test("cardHtml uses singular and plural source labels", () => {
   assert.match(cardHtml({ sources: "1" }), /1 source<\/span>/);
   assert.match(cardHtml({ sources: "3" }), /3 sources<\/span>/);
 });
+
+test("cardHtml renders a safe image URL", () => {
+  assert.match(cardHtml({ imgSrc: "https://example.com/a.jpg" }), /<img src="https:\/\/example\.com\/a\.jpg"/);
+});
+
+test("cardHtml omits the meta line for a card without time or sources", () => {
+  assert.doesNotMatch(cardHtml({ headline: "Headline" }), /class="meta"/);
+});

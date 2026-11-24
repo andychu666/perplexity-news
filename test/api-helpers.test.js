@@ -22,6 +22,16 @@ test("relativeTime: boundaries and unit wording match the UI", () => {
   }
 });
 
+test("relativeTime: rounds half a minute up and 89.999 s down", () => {
+  assert.strictEqual(relativeTime(new Date(now - 30000).toISOString(), now), "1 minute ago");
+  assert.strictEqual(relativeTime(new Date(now - 89999).toISOString(), now), "1 minute ago");
+});
+
+test("relativeTime: rounds 35 hours to 1 day and 36 hours to 2 days", () => {
+  assert.strictEqual(relativeTime(minutesAgo(35 * 60), now), "1 day ago");
+  assert.strictEqual(relativeTime(minutesAgo(36 * 60), now), "2 days ago");
+});
+
 test("relativeTime: future/skewed and invalid timestamps", () => {
   assert.strictEqual(relativeTime(minutesAgo(-2), now), "just now");
   assert.strictEqual(relativeTime("not-a-date", now), null);
@@ -83,4 +93,10 @@ test("Top API cards filter whitespace headlines and keep usable cards", () => {
   const items = [{ title: " \t\n" }, { short_title: " " }, { title: "Headline", slug: "abc" }];
   const cards = items.map(apiCard);
   assert.deepStrictEqual(selectTopApiCards(cards), [cards[2]]);
+});
+
+test("Top API cards skip null cards and non-string headlines and keep feed order", () => {
+  const first = { headline: "First" };
+  const second = { headline: "Second" };
+  assert.deepStrictEqual(selectTopApiCards([null, { headline: 42 }, first, { headline: " " }, second]), [first, second]);
 });
