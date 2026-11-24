@@ -305,11 +305,11 @@ function apiGet(pathname, evalFn = browserEval) {
 
 // Mirrors the UI's wording ("13 hours ago", "1 hour ago") so the rendered HTML
 // matches, including singular units and clock-skewed (future) timestamps.
-function relativeTime(iso) {
+function relativeTime(iso, now = Date.now()) {
   if (!iso) return null;
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return null;
-  const minutes = Math.round((Date.now() - then) / 60000);
+  const minutes = Math.round((now - then) / 60000);
   if (minutes <= 0) return "just now";
   if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
   const hours = Math.round(minutes / 60);
