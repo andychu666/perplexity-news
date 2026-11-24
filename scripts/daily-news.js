@@ -242,16 +242,18 @@ function scrapeCategory(cat) {
   // (or a future backslash/quote) can break out of the command.
   const raw = execFileSync(EVAL, [extractJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" });
 
+  let result;
   try {
-    return JSON.parse(raw);
+    result = JSON.parse(raw);
   } catch (e) {
     log(`  Parse error for ${cat.name}: ${e.message}`);
     const match = raw.match(/(\{[\s\S]*\})/);
     if (match) {
-      try { return JSON.parse(match[1]); } catch { /* truncated output */ }
+      try { result = JSON.parse(match[1]); } catch { /* truncated output */ }
     }
-    return { count: 0, cards: [] };
   }
+  return Number.isInteger(result?.count) && result.count >= 0 && Array.isArray(result.cards)
+    ? result : { count: 0, cards: [] };
 }
 
 // ── API path (primary) ──────────────────────────────────────────────
@@ -276,15 +278,29 @@ function openDiscoverTab({
   sleep = sleepSync,
 } = {}) {
   nav(`${ORIGIN}/discover/top`);
-  let title = "";
+  let readSucceeded = false;
+  let lastError;
+  let challengeTitle;
   for (let waited = 0; waited <= CHALLENGE_WAIT_MS; waited += 1000) {
     try {
-      title = readTitle();
-      if (!isChallengeTitle(title)) return;
-    } catch { /* page is reloading */ }
+      const title = readTitle().trim();
+      readSucceeded = true;
+      if (title) {
+        if (!isChallengeTitle(title)) return;
+        challengeTitle = title;
+      }
+    } catch (e) {
+      lastError = e;
+    }
     sleep(1000);
   }
-  throw botChallengeError(`page is a Cloudflare interstitial (title "${title}")`);
+  if (!readSucceeded) {
+    throw new Error(`Could not read Discover page title: ${lastError?.message ?? String(lastError)}`);
+  }
+  if (challengeTitle) {
+    throw botChallengeError(`page is a Cloudflare interstitial (title "${challengeTitle}")`);
+  }
+  throw new Error("Discover page title stayed empty");
 }
 
 // The fetch runs inside the Discover tab, so it carries the browser's own

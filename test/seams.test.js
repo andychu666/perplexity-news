@@ -297,13 +297,13 @@ function titleReader(answers) {
   return reader;
 }
 
-test("openDiscoverTab reads the title again a second after a failed or challenged read", () => {
-  const title = titleReader([new Error("Execution context was destroyed"), "Just a moment...", "Discover - Perplexity"]);
+test("openDiscoverTab waits after an empty, failed or challenged title read", () => {
+  const title = titleReader(["", new Error("Execution context was destroyed"), "Just a moment...", "Discover - Perplexity"]);
   const sleeps = [];
   openDiscoverTab({ nav: quiet, title, sleep: (ms) => sleeps.push(ms) });
 
-  assert.equal(title.reads, 3);
-  assert.deepEqual(sleeps, [1000, 1000]);
+  assert.equal(title.reads, 4);
+  assert.deepEqual(sleeps, [1000, 1000, 1000]);
 });
 
 test("openDiscoverTab reports the interstitial after 31 title reads a second apart", () => {
@@ -320,13 +320,22 @@ test("openDiscoverTab reports the interstitial after 31 title reads a second apa
   assert.deepEqual(sleeps, Array(31).fill(1000));
 });
 
-test("openDiscoverTab reports an empty title when every title read fails", () => {
-  const title = titleReader([new Error("eval failed")]);
+test("openDiscoverTab reports the last eval error when every title read fails", () => {
+  const title = titleReader([new Error("first eval failure"), new Error("last eval failure")]);
   assert.throws(
     () => openDiscoverTab({ nav: quiet, title, sleep: quiet }),
-    { message: 'bot challenge: page is a Cloudflare interstitial (title "")', botChallenge: true },
+    (error) => error.message === "Could not read Discover page title: last eval failure" && !error.botChallenge,
   );
 
+  assert.equal(title.reads, 31);
+});
+
+test("openDiscoverTab reports a timeout for titles that stay empty", () => {
+  const title = titleReader([""]);
+  assert.throws(
+    () => openDiscoverTab({ nav: quiet, title, sleep: quiet }),
+    (error) => error.message === "Discover page title stayed empty" && !error.botChallenge,
+  );
   assert.equal(title.reads, 31);
 });
 

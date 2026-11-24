@@ -138,6 +138,13 @@ test("extract output with unparseable JSON is an empty page, not a scrape error"
   assert.equal(run.log.some((line) => line.includes("ERROR —")), false);
 });
 
+test("extract output with a malformed result shape is an empty page", (t) => {
+  for (const extract of ["null", "{}", 'warning: {"count":1}', '{"count":"1","cards":[]}']) {
+    const run = scrapeTech(t, { count: 2, title: normalTitle, extract });
+    assert.deepEqual(run.out, { result: { count: 0, cards: [] }, attempts: 3, blocked: false }, extract);
+  }
+});
+
 // ── collectDigest and openDiscoverTab, through their defaults ───────
 
 const COLLECT_DRIVER = `
