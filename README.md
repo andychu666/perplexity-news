@@ -41,7 +41,12 @@ node scripts/daily-news.js --open
 ### Prerequisites
 
 - **Node.js** `>= 18`
-- **Chrome/Chromium** installed — auto-detected from common paths and auto-started headless on port `9222` if not already running
+- **Chrome/Chromium** installed — auto-detected from common paths and auto-started on port `9222` if not already running
+- **xvfb** (`sudo apt install xvfb`) — recommended. Chrome must run **headed**: since 2026-11-21 Cloudflare challenges headless Chrome (HTTP 403, `cf-mitigated: challenge`, "Just a moment..." page), while a headed Chrome passes the check by itself in a few seconds. With `xvfb-run` the script starts Chrome in a virtual display, so no window appears. Without it, the script falls back to headless Chrome, which is likely to be blocked.
+
+> **A visible Chrome window is OK.** A normal Chrome that you start yourself on port `9222` (with a window on your desktop) works too: the script reuses any Chrome already on that port. Only a *headless* Chrome on the port is a problem — the script logs a warning; close it so the next run starts a headed one.
+>
+> The script never solves or evades the challenge: no user-agent spoofing, no stealth flags. It only runs a normal browser. If Cloudflare gets stricter later, runs can be blocked again (#27).
 - **pi browser-tools** at `~/.pi/agent/skills/pi-skills/browser-tools/` — the script uses `browser-nav.js` and `browser-eval.js` from this skill. This is the only setup dependency; no separate `puppeteer-core` install needed.
 
 To start the browser (optional — the script auto-starts headless if port 9222 is free):
@@ -100,7 +105,8 @@ perplexity-news/
 │   └── daily-news.js              # Main scraper + HTML generator
 ├── test/
 │   ├── hydration-poll.test.js     # Unit tests for hydration polling
-│   └── card-parse.test.js         # Unit tests for card metadata extraction
+│   ├── card-parse.test.js         # Unit tests for card metadata extraction
+│   └── bot-challenge.test.js      # Unit tests for Cloudflare challenge handling + API paging
 ├── follow-ups/                    # Code review follow-up notes
 ├── package.json                   # npm test entrypoint
 ├── README.md                      # This file
@@ -109,13 +115,16 @@ perplexity-news/
 
 ## 🛠️ How It Works
 
-1. Ensures Chrome is running on `localhost:9222` (auto-starts headless if not)
-2. Navigates to each Perplexity Discover category page in sequence
-3. Waits for story cards to hydrate via poll loop with configurable timeout (#8)
-4. Extracts card data from DOM leaf elements to prevent digit concatenation (#9, #10)
-5. Parses both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#9, #10)
-6. Generates a self-contained dark-themed HTML file with all data
-7. Saves to `~/Downloads/perplexity-news-YYYY-MM-DD.html`
+1. Ensures Chrome is running on `localhost:9222` (auto-starts it headed under `xvfb-run` if not)
+2. Opens Discover, waits for Cloudflare's check to pass, and fetches the Top feed from the API inside that tab
+3. Navigates to each other Perplexity Discover category page in sequence
+4. Waits for story cards to hydrate via poll loop with configurable timeout (#8)
+5. Extracts card data from DOM leaf elements to prevent digit concatenation (#9, #10)
+6. Parses both relative times ("3 hours ago") and absolute dates ("Jul 7, 2026") (#9, #10)
+7. Generates a self-contained dark-themed HTML file with all data
+8. Saves to `~/Downloads/perplexity-news-YYYY-MM-DD.html`
+
+If Cloudflare still answers with its challenge, the script does not retry that category, and the final error names the bot challenge.
 
 ## 📋 Options
 
