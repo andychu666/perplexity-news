@@ -1,0 +1,613 @@
+#!/usr/bin/env node
+"use strict";
+// Mutation runner for the guards that PR #29 adds or changes in
+// scripts/daily-news.js (`git diff origin/main...HEAD`).
+//
+//   node test/mutants/run-mutants             # every mutant
+//   node test/mutants/run-mutants apiGet      # one function's mutants only
+//
+// The file has no .js extension on purpose: `node --test` collects every
+// *.js file under test/, so a run-mutants.js would run inside `npm test`.
+//
+// Each mutant edits scripts/daily-news.js in place, `node --test` runs, and
+// the file is restored from a backup copy. The run refuses to start unless
+// HEAD's script is byte-identical to the pinned head's and the working file
+// matches HEAD, and refuses to print the SUMMARY unless the file matches HEAD
+// again at the end.
+
+const { spawn, execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const PINNED = "82eeb2eb978e56f8c6425c5dc1ba53ea88b104a4";
+const ROOT = path.resolve(__dirname, "..", "..");
+const REL = "scripts/daily-news.js";
+const TARGET = path.join(ROOT, REL);
+const TIMEOUT_MS = 60000; // per mutant; a hang counts as "killed (timeout)"
+
+// ── Survivors that only a code change can make testable ─────────────
+const NEEDS_CODE = {
+  main: "needs code: main — its API, Top, backfill, blocked-flag and --open steps run only after ensureChrome(), which no test may reach — export a collectDigest({ openTab, fetchFeed, scrape }) that returns { allData, blocked }, and an openDigest(outPath, { exec, logFn })",
+  openDiscoverTab: "needs code: openDiscoverTab — only main() calls it, and its nav, title and sleep calls are bound inside the module — export it with injectable { nav, title, sleep } defaults, as waitForHydratedCards does",
+  ensureChrome: "needs code: ensureChrome — it probes the CDP port and starts Chrome, which tests may not do — export pure helpers cdpPort(url), headlessWarning(versionText) and chromeCommand({ chromeBin, port, userDataDir, hasXvfb }) that returns { cmd, args }",
+};
+
+// ── Mutants ─────────────────────────────────────────────────────────
+// add(line, mutation, from, to, note): `from` must start on `line`; the first
+// match at or after that line's start is replaced by `to`. A note marks a
+// survivor as explained: { eq: "<checked reason>" } or { needs: "<symbol>" }.
+const MUTANTS = [];
+let fn = "";
+let groupNote;
+const eq = (reason) => ({ eq: reason });
+const needs = (symbol) => ({ needs: symbol });
+
+function group(name, note) {
+  fn = name;
+  groupNote = note;
+}
+function add(line, what, from, to, note = groupNote) {
+  MUTANTS.push({ id: MUTANTS.length + 1, line, fn, what, from, to, note });
+}
+function cond(line, expr, notes = {}, label = "condition") {
+  add(line, `${label} negated`, `if (${expr})`, `if (!(${expr}))`, notes.negated);
+  add(line, `${label} True`, `if (${expr})`, "if (true)", notes.True);
+  add(line, `${label} False (guard deleted)`, `if (${expr})`, "if (false)", notes.False);
+}
+function ternary(line, expr, notes = {}) {
+  add(line, "condition negated", `${expr} ?`, `!(${expr}) ?`, notes.negated);
+  add(line, "condition True", `${expr} ?`, "true ?", notes.True);
+  add(line, "condition False", `${expr} ?`, "false ?", notes.False);
+}
+// `catch (e) { if (e.code !== "ENOENT") logFn(...); ... }`
+function enoentCatch(line) {
+  cond(line, 'e.code !== "ENOENT"', {}, "code check");
+  add(line, "catch emptied (rethrows)", 'if (e.code !== "ENOENT")', 'throw e; if (e.code !== "ENOENT")');
+  add(line, "catch narrowed to ENOENT (others rethrown)", 'if (e.code !== "ENOENT") logFn(', 'if (e.code !== "ENOENT") throw e; if (false) logFn(');
+}
+
+group("parseArgs");
+add(57, '`?? ""` fallback removed', 'argv[++i] ?? ""', "argv[++i]");
+cond(58, "!suffix || /[^A-Za-z0-9_-]/.test(suffix)");
+add(58, "`!suffix` operand deleted", "!suffix || /", "/");
+add(58, "regex operand deleted", " || /[^A-Za-z0-9_-]/.test(suffix)", "");
+add(58, "any → all (`||` → `&&`)", "!suffix || /", "!suffix && /");
+add(58, "regex forced to always match", "/[^A-Za-z0-9_-]/", "/(?:)/");
+add(58, "regex forced to never match", "/[^A-Za-z0-9_-]/", "/(?!)/");
+// The regex has no ^/$ anchors: [^…] is a negated class.
+add(60, "exit code 1 → 0", "process.exit(1)", "process.exit(0)");
+add(60, "exit code 1 → 2", "process.exit(1)", "process.exit(2)");
+
+group("sleepSync");
+add(80, "clamp removed", "Math.max(0, ms)", "ms", eq("Atomics.wait clamps a negative timeout to 0 itself (ECMA-262 Atomics.wait: t = max(q, 0)), and every caller passes ≥ 500 ms"));
+add(80, "clamp bound 0 → 1", "Math.max(0, ms)", "Math.max(1, ms)", eq("every caller passes ≥ 500 ms (RETRY_DELAY_MS, HYDRATION_INITIAL_WAIT_MS, HYDRATION_POLL_MS, 1000, 500), so max(1, ms) = ms"));
+add(80, "clamp bound 0 → −1", "Math.max(0, ms)", "Math.max(-1, ms)", eq("Atomics.wait clamps a negative timeout to 0, the same wait as max(0, ms)"));
+
+// These lines changed only from var to let/const; the guards are as on main.
+group("parseCardFromLeaves");
+const trailingPublished = 'a trailing Published leaf has no candidate: .test(undefined) tests "undefined", which matches neither date pattern, so published stays null';
+const pastLastLeaf = 'leafTexts[length] is undefined, and `if (!headline)` maps it to the same "" as the original null';
+add(130, "`<` → `<=`", "i < leafTexts.length;", "i <= leafTexts.length;");
+add(130, "bound − 1", "i < leafTexts.length;", "i < leafTexts.length - 1;");
+add(130, "bound + 1", "i < leafTexts.length;", "i < leafTexts.length + 1;");
+add(130, "loop cut to its first element", "i < leafTexts.length;", "i < Math.min(1, leafTexts.length);");
+add(130, "loop exits early", "i++) {", "i++) { break;");
+add(130, "loop reversed", "let i = 0; i < leafTexts.length; i++", "let i = leafTexts.length - 1; i >= 0; i--");
+add(131, "regex forced to always match", String.raw`/^(\d+)\s*sources?$/i`, "/(.*)/");
+add(131, "regex forced to never match", String.raw`/^(\d+)\s*sources?$/i`, "/(?!)/");
+add(131, "`^` anchor dropped", String.raw`/^(\d+)\s*sources?$/i`, String.raw`/(\d+)\s*sources?$/i`);
+add(131, "`$` anchor dropped", String.raw`/^(\d+)\s*sources?$/i`, String.raw`/^(\d+)\s*sources?/i`);
+add(136, "`<` → `<=`", "i < leafTexts.length - 1;", "i <= leafTexts.length - 1;", eq(trailingPublished));
+add(136, "bound − 1", "i < leafTexts.length - 1;", "i < leafTexts.length - 2;");
+add(136, "bound + 1", "i < leafTexts.length - 1;", "i < leafTexts.length;", eq(trailingPublished));
+add(136, "loop cut to its first element", "i < leafTexts.length - 1;", "i < Math.min(1, leafTexts.length - 1);");
+add(136, "loop exits early", "i++) {", "i++) { break;");
+add(136, "loop reversed", "let i = 0; i < leafTexts.length - 1; i++", "let i = leafTexts.length - 2; i >= 0; i--");
+add(148, "`<` → `<=`", "i < leafTexts.length;", "i <= leafTexts.length;", eq(pastLastLeaf));
+add(148, "bound − 1", "i < leafTexts.length;", "i < leafTexts.length - 1;");
+add(148, "bound + 1", "i < leafTexts.length;", "i < leafTexts.length + 1;", eq(pastLastLeaf));
+add(148, "loop cut to its first element", "i < leafTexts.length;", "i < Math.min(1, leafTexts.length);");
+add(148, "loop exits early", "i++) {", "i++) { break;");
+add(148, "loop reversed", "let i = 0; i < leafTexts.length; i++", "let i = leafTexts.length - 1; i >= 0; i--");
+
+group("isChallengeTitle");
+add(167, "regex forced to always match", "/^just a moment/i", "/(?:)/");
+add(167, "regex forced to never match", "/^just a moment/i", "/(?!)/");
+add(167, "`^` anchor dropped", "/^just a moment/i", "/just a moment/i");
+add(167, "`.trim()` removed", "String(title).trim()", "String(title)");
+
+group("botChallengeError");
+add(172, "flag true → false", "err.botChallenge = true;", "err.botChallenge = false;");
+add(172, "flag assignment deleted", "err.botChallenge = true;", "");
+
+group("noCardsMessage");
+add(177, "condition negated", "return blocked", "return !blocked");
+add(177, "condition True", "return blocked", "return true");
+add(177, "condition False", "return blocked", "return false");
+
+// Reached through scrapeWithRetries' default `scrape`, in a child process
+// whose child_process module is replaced (test/fake-browser.test.js).
+group("scrapeCategory");
+cond(208, "cardCount === 0");
+add(208, "constant 0 → 1", "cardCount === 0", "cardCount === 1");
+add(208, "constant 0 → −1", "cardCount === 0", "cardCount === -1");
+cond(210, "isChallengeTitle(title)");
+cond(250, "match", { True: eq("with no match, match[1] throws inside the inner try, and its catch falls through to the same empty result") });
+add(251, "catch emptied (rethrows)", "catch { /* truncated output */ }", "catch (e) { throw e; }");
+
+group("openDiscoverTab", needs("openDiscoverTab"));
+add(268, "constant 30000 → 29999", "CHALLENGE_WAIT_MS = 30000", "CHALLENGE_WAIT_MS = 29999");
+add(268, "constant 30000 → 30001", "CHALLENGE_WAIT_MS = 30000", "CHALLENGE_WAIT_MS = 30001", eq("waited only takes multiples of 1000, so `<= 30001` admits the same 31 polls as `<= 30000`"));
+add(276, "`<=` → `<`", "waited <= CHALLENGE_WAIT_MS", "waited < CHALLENGE_WAIT_MS");
+add(276, "start 0 → 1", "let waited = 0;", "let waited = 1;");
+add(276, "start 0 → −1", "let waited = 0;", "let waited = -1;", eq("−1, 999, …, 29999 is also 31 polls, and waited is read only by the loop bound"));
+add(276, "step 1000 → 999", "waited += 1000", "waited += 999", eq("0, 999, …, 29970 is also 31 polls, and waited is read only by the loop bound"));
+add(276, "step 1000 → 1001", "waited += 1000", "waited += 1001");
+add(276, "loop cut to its first element", "waited <= CHALLENGE_WAIT_MS;", "waited <= 0;");
+add(276, "loop exits early", "waited += 1000) {", "waited += 1000) { break;");
+// Not reversed: every poll is the same call, so order does not matter.
+cond(279, "!isChallengeTitle(title)");
+add(280, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+
+group("ensureChrome", needs("ensureChrome"));
+cond(619, "/HeadlessChrome/.test(version)");
+add(619, "regex forced to always match", "/HeadlessChrome/", "/(?:)/");
+add(619, "regex forced to never match", "/HeadlessChrome/", "/(?!)/");
+add(636, "executable check deleted", "fs.accessSync(c, fs.constants.X_OK);", "");
+add(648, "stale-lock guard call deleted", "clearStaleLocks(userDataDir);", "");
+add(650, '`|| "9222"` fallback removed', ' || "9222"', "");
+add(668, "xvfb-run check deleted", "fs.accessSync(XVFB_RUN, fs.constants.X_OK);", "");
+add(669, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+ternary(675, "cmd === XVFB_RUN");
+
+group("main", needs("main"));
+const emptyFeed = "with no feed items apiByTitle is empty, so every lookup misses and nothing changes";
+add(745, "reset false → true", "let blocked = false;", "let blocked = true;");
+cond(751, "e.botChallenge");
+add(751, "flag true → false", "blocked = true;", "blocked = false;");
+ternary(759, "card", { True: eq("fetchFeedItems keeps only object entries (L353) and apiCard returns null only for non-objects (L322), so card is never null here") });
+cond(760, "key", { True: eq("an empty key is never read: the backfill skips empty keys before its lookup (L787)") });
+add(763, "guard call deleted", "selectTopApiCards(apiCards)", "apiCards");
+cond(771, 'cat.id === "top" && topCards.length > 0');
+add(771, "`cat.id` operand deleted", 'cat.id === "top" && ', "");
+add(771, "`length` operand deleted", " && topCards.length > 0", "");
+add(771, "all → any (`&&` → `||`)", '"top" && topCards', '"top" || topCards');
+add(771, "`>` → `>=`", "topCards.length > 0", "topCards.length >= 0");
+add(771, "constant 0 → 1", "topCards.length > 0", "topCards.length > 1");
+add(771, "constant 0 → −1", "topCards.length > 0", "topCards.length > -1");
+cond(778, "scraped.blocked");
+add(778, "flag true → false", "blocked = true;", "blocked = false;");
+cond(783, "!servedByApi && feedItems.length > 0");
+add(783, "`servedByApi` operand deleted", "!servedByApi && ", "");
+add(783, "`length` operand deleted", " && feedItems.length > 0", "", eq(emptyFeed));
+add(783, "all → any (`&&` → `||`)", "!servedByApi && feedItems", "!servedByApi || feedItems");
+add(783, "`>` → `>=`", "feedItems.length > 0", "feedItems.length >= 0", eq(emptyFeed));
+add(783, "constant 0 → 1", "feedItems.length > 0", "feedItems.length > 1");
+add(783, "constant 0 → −1", "feedItems.length > 0", "feedItems.length > -1", eq(emptyFeed));
+cond(787, "!key || card.published");
+add(787, "`!key` operand deleted", "!key || ", "", eq("apiByTitle never holds an empty key (L760), so the lookup misses"));
+add(787, "`published` operand deleted", " || card.published", "");
+add(787, "any → all (`||` → `&&`)", "!key || card", "!key && card");
+add(821, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
+
+// The 64 MiB cap is not a guard; its removal is checked because a feed page
+// outgrows Node's 1 MiB default.
+group("browserEval");
+add(290, "maxBuffer option removed (1 MiB default)", ", maxBuffer: 64 * 1024 * 1024", "");
+
+group("apiGet");
+add(293, "default `evalFn = browserEval` removed", "evalFn = browserEval", "evalFn");
+ternary(296, "r.ok"); // inside the in-page fetch script
+cond(299, "res.status < 200 || res.status >= 300");
+add(299, "`< 200` operand deleted", "res.status < 200 || ", "");
+add(299, "`>= 300` operand deleted", " || res.status >= 300", "");
+add(299, "any → all (`||` → `&&`)", "< 200 || res", "< 200 && res");
+add(299, "`<` → `<=`", "res.status < 200", "res.status <= 200");
+add(299, "constant 200 → 199", "res.status < 200", "res.status < 199");
+add(299, "constant 200 → 201", "res.status < 200", "res.status < 201");
+add(299, "`>=` → `>`", "res.status >= 300", "res.status > 300");
+add(299, "constant 300 → 299", "res.status >= 300", "res.status >= 299");
+add(299, "constant 300 → 301", "res.status >= 300", "res.status >= 301");
+cond(300, 'res.mitigated === "challenge"');
+ternary(301, "res.mitigated");
+
+group("relativeTime");
+add(308, "default `now = Date.now()` removed", "now = Date.now()", "now");
+add(312, "constant 60000 → 59999", "/ 60000", "/ 59999");
+add(312, "constant 60000 → 60001", "/ 60000", "/ 60001");
+cond(313, "minutes <= 0");
+add(313, "`<=` → `<`", "minutes <= 0", "minutes < 0");
+add(313, "constant 0 → 1", "minutes <= 0", "minutes <= 1");
+add(313, "constant 0 → −1", "minutes <= 0", "minutes <= -1");
+cond(314, "minutes < 60");
+add(314, "`<` → `<=`", "minutes < 60", "minutes <= 60");
+add(314, "constant 60 → 59", "minutes < 60", "minutes < 59");
+add(314, "constant 60 → 61", "minutes < 60", "minutes < 61");
+ternary(314, "minutes === 1");
+add(314, "constant 1 → 0", "minutes === 1", "minutes === 0");
+add(314, "constant 1 → 2", "minutes === 1", "minutes === 2");
+cond(316, "hours < 24");
+add(316, "`<` → `<=`", "hours < 24", "hours <= 24");
+add(316, "constant 24 → 23", "hours < 24", "hours < 23");
+add(316, "constant 24 → 25", "hours < 24", "hours < 25");
+ternary(316, "hours === 1");
+add(316, "constant 1 → 0", "hours === 1", "hours === 0");
+add(316, "constant 1 → 2", "hours === 1", "hours === 2");
+add(317, "constant 24 → 23", "hours / 24", "hours / 23");
+add(317, "constant 24 → 25", "hours / 24", "hours / 25");
+ternary(318, "days === 1");
+add(318, "constant 1 → 0", "days === 1", "days === 0");
+add(318, "constant 1 → 2", "days === 1", "days === 2");
+
+group("apiCard");
+const hasCount = "preview.total_count !== null && preview.total_count !== undefined";
+cond(322, '!item || typeof item !== "object"');
+add(322, "`!item` operand deleted", "!item || ", "");
+add(322, "`typeof` operand deleted", ' || typeof item !== "object"', "");
+add(322, "any → all (`||` → `&&`)", "!item || typeof", "!item && typeof");
+add(328, "condition negated", hasCount, `!(${hasCount})`);
+add(328, "condition True", hasCount, "true");
+add(328, "condition False", hasCount, "false");
+add(328, "`!== null` operand deleted", "preview.total_count !== null && ", "");
+add(328, "`!== undefined` operand deleted", " && preview.total_count !== undefined", "");
+add(328, "all → any (`&&` → `||`)", "!== null && preview", "!== null || preview");
+
+group("selectTopApiCards");
+const usable = 'typeof card?.headline === "string" && card.headline.trim()';
+add(336, "predicate negated", usable, `!(${usable})`);
+add(336, "predicate True", usable, "true");
+add(336, "predicate False", usable, "false");
+add(336, "`typeof` operand deleted", 'typeof card?.headline === "string" && ', "");
+add(336, "`trim` operand deleted", " && card.headline.trim()", "");
+add(336, "all → any (`&&` → `||`)", '"string" && card', '"string" || card');
+add(336, "optional chaining `?.` removed", "card?.headline", "card.headline");
+add(336, "`.trim()` removed", "card.headline.trim()", "card.headline");
+add(336, "loop cut to its first element", "cards.filter(", "cards.slice(0, 1).filter(");
+add(336, "loop exits early", "cards.filter(", "[].filter(");
+add(336, "loop reversed", "cards.filter(", "cards.slice().reverse().filter(");
+
+group("fetchFeedItems");
+const shape = "body && Array.isArray(body.items)";
+const isEntry = 'entry && typeof entry === "object"';
+add(339, "default `pages = 2` removed", "pages = 2", "pages");
+add(339, "default 2 → 1", "pages = 2", "pages = 1");
+add(339, "default 2 → 3", "pages = 2", "pages = 3");
+add(339, "default `perPage = 100` removed", "perPage = 100", "perPage");
+add(339, "default 100 → 99", "perPage = 100", "perPage = 99");
+add(339, "default 100 → 101", "perPage = 100", "perPage = 101");
+add(339, "default `get = apiGet` removed", "get = apiGet", "get");
+add(339, "default `= {}` removed", "} = {})", "})");
+add(341, "`<` → `<=`", "i < pages;", "i <= pages;");
+add(341, "bound − 1", "i < pages;", "i < pages - 1;");
+add(341, "bound + 1", "i < pages;", "i < pages + 1;");
+add(341, "start 0 → 1", "let i = 0;", "let i = 1;");
+add(341, "start 0 → −1", "let i = 0;", "let i = -1;");
+add(341, "loop cut to its first element", "i < pages;", "i < Math.min(1, pages);");
+add(341, "loop exits early", "i++) {", "i++) { break;");
+add(341, "loop reversed", "let i = 0; i < pages; i++", "let i = pages - 1; i >= 0; i--");
+add(348, "condition negated", "if (i === 0)", "if (!(i === 0))");
+add(348, "condition True (= catch emptied, every failure rethrown)", "if (i === 0)", "if (true)");
+add(348, "condition False (guard deleted)", "if (i === 0)", "if (false)");
+add(348, "constant 0 → 1", "i === 0", "i === 1");
+add(348, "constant 0 → −1", "i === 0", "i === -1");
+add(352, "condition negated", `${shape} ?`, `!(${shape}) ?`);
+add(352, "condition True (guard deleted)", `${shape} ?`, "true ?");
+add(352, "condition False", `${shape} ?`, "false ?");
+add(352, "`body` operand deleted", "body && Array", "Array");
+add(352, "`isArray` operand deleted", " && Array.isArray(body.items) ?", " ?");
+add(352, "all → any (`&&` → `||`)", "body && Array", "body || Array");
+add(353, "predicate negated", isEntry, `!(${isEntry})`);
+add(353, "predicate True", isEntry, "true");
+add(353, "predicate False", isEntry, "false");
+add(353, "`entry` operand deleted", "entry && typeof", "typeof");
+add(353, "`typeof` operand deleted", ' && typeof entry === "object"', "");
+add(353, "all → any (`&&` → `||`)", "entry && typeof", "entry || typeof");
+add(353, "loop cut to its first element", "batch.filter(", "batch.slice(0, 1).filter(");
+add(353, "loop exits early", "batch.filter(", "[].filter(");
+add(353, "loop reversed", "batch.filter(", "batch.slice().reverse().filter(");
+
+group("normalizeTitle");
+add(362, '`|| ""` fallback removed', 'String(text || "")', "String(text)");
+add(362, "regex forced to always match", String.raw`/[^\p{L}\p{N}]+/gu`, String.raw`/[\s\S]/gu`);
+add(362, "regex forced to never match", String.raw`/[^\p{L}\p{N}]+/gu`, "/(?!)/gu");
+// No ^/$ anchors.
+
+group("safeUrl");
+const webProtocol = 'protocol === "http:" || protocol === "https:"';
+add(377, '`|| ""` fallback removed', 'String(value || "")', "String(value)", eq('every falsy value stringifies to a scheme-less string ("undefined", "null", "0", "false", "NaN"), which new URL() rejects, so the catch returns the same ""'));
+add(377, "`.trim()` removed", ".trim();", ";");
+cond(378, "!raw", { False: eq('new URL("") throws, and the catch returns the same ""') });
+add(381, "condition negated", `${webProtocol} ?`, `!(${webProtocol}) ?`);
+add(381, "condition True", `${webProtocol} ?`, "true ?");
+add(381, "condition False", `${webProtocol} ?`, "false ?");
+add(381, "`http:` operand deleted", 'protocol === "http:" || ', "");
+add(381, "`https:` operand deleted", ' || protocol === "https:"', "");
+add(381, "any → all (`||` → `&&`)", '"http:" || protocol', '"http:" && protocol');
+add(382, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
+
+group("cardHtml");
+add(389, '`|| "#"` fallback removed', 'safeUrl(card.href) || "#"', "safeUrl(card.href)");
+add(389, "safeUrl guard deleted", "safeUrl(card.href) || ", "card.href || ");
+add(390, "condition negated", "card.imgSrc ?", "!(card.imgSrc) ?");
+add(390, "condition True", "card.imgSrc ?", "true ?", eq('safeUrl() of a missing image returns "", the same as the else branch'));
+add(390, "condition False", "card.imgSrc ?", "false ?");
+add(390, "safeUrl guard deleted", "escapeHtml(safeUrl(card.imgSrc))", "escapeHtml(card.imgSrc)");
+add(392, "condition negated", "const sources = card.sources", "const sources = !(card.sources)");
+add(392, "condition True", "const sources = card.sources", "const sources = true");
+add(392, "condition False", "const sources = card.sources", "const sources = false");
+add(393, "escaping deleted", "escapeHtml(String(card.sources))", "String(card.sources)");
+ternary(393, 'String(card.sources) === "1"');
+add(393, 'constant "1" → "0"', '=== "1"', '=== "0"');
+add(393, 'constant "1" → "2"', '=== "1"', '=== "2"');
+
+// Reached through clearStaleLocks' default `isAlive`.
+group("isProcessAlive");
+add(558, "result True → False", "return true;", "return false;");
+add(561, "catch emptied (rethrows)", 'return e.code !== "ESRCH";', "throw e;");
+add(561, "catch narrowed to ESRCH (others rethrown)", 'return e.code !== "ESRCH";', 'if (e.code !== "ESRCH") throw e; return false;');
+add(561, "code check negated", 'e.code !== "ESRCH"', 'e.code === "ESRCH"');
+add(561, "code check True", 'e.code !== "ESRCH"', "true");
+add(561, "code check False", 'e.code !== "ESRCH"', "false");
+
+group("clearStaleLocks");
+const malformed = "separator <= 0 || !/^[0-9]+$/.test(pidText) || pid <= 0 || pid > 0x7fffffff";
+add(565, "default `hostname = os.hostname()` removed", "hostname = os.hostname()", "hostname");
+add(565, "default `isAlive = isProcessAlive` removed", "isAlive = isProcessAlive", "isAlive");
+add(565, "default `logFn = log` removed", "logFn = log", "logFn");
+add(565, "default `= {}` removed", "} = {})", "})");
+enoentCatch(571);
+add(575, "scan reversed (`indexOf`)", 'lastIndexOf("-")', 'indexOf("-")');
+cond(579, malformed);
+add(579, "`separator` operand deleted", "separator <= 0 || ", "");
+add(579, "regex operand deleted", "!/^[0-9]+$/.test(pidText) || ", "");
+add(579, "`pid <= 0` operand deleted", "pid <= 0 || ", "");
+add(579, "`pid > max` operand deleted", " || pid > 0x7fffffff", "");
+add(579, "any → all (`||` → `&&`)", malformed, malformed.replaceAll(" || ", " && "));
+add(579, "`<=` → `<` (separator)", "separator <= 0", "separator < 0");
+add(579, "constant 0 → 1 (separator)", "separator <= 0", "separator <= 1");
+add(579, "constant 0 → −1 (separator)", "separator <= 0", "separator <= -1");
+add(579, "regex forced to always match", "/^[0-9]+$/", "/(?:)/");
+add(579, "regex forced to never match", "/^[0-9]+$/", "/(?!)/");
+add(579, "`^` anchor dropped", "/^[0-9]+$/", "/[0-9]+$/");
+add(579, "`$` anchor dropped", "/^[0-9]+$/", "/^[0-9]+/");
+add(579, "`<=` → `<` (pid)", "pid <= 0", "pid < 0");
+add(579, "constant 0 → 1 (pid)", "pid <= 0", "pid <= 1");
+add(579, "constant 0 → −1 (pid)", "pid <= 0", "pid <= -1");
+add(579, "`>` → `>=` (pid max)", "pid > 0x7fffffff", "pid >= 0x7fffffff");
+add(579, "constant max − 1", "pid > 0x7fffffff", "pid > 0x7ffffffe");
+add(579, "constant max + 1", "pid > 0x7fffffff", "pid > 0x80000000");
+cond(583, "lockHost !== hostname");
+cond(587, "isAlive(pid) !== false");
+add(587, "`!== false` → truthy test", "isAlive(pid) !== false", "isAlive(pid)");
+cond(595, "fs.readlinkSync(lockPath) !== target");
+enoentCatch(600);
+add(603, "loop cut to its first element", '["SingletonSocket", "SingletonCookie", "SingletonLock"]', '["SingletonSocket"]');
+add(603, "loop exits early", '"SingletonLock"]) {', '"SingletonLock"]) { break;');
+add(603, "loop reversed", '["SingletonSocket", "SingletonCookie", "SingletonLock"]', '["SingletonLock", "SingletonCookie", "SingletonSocket"]');
+enoentCatch(608);
+
+group("scrapeWithRetries");
+add(701, "constant 5000 → 4999", "RETRY_DELAY_MS = 5000", "RETRY_DELAY_MS = 4999");
+add(701, "constant 5000 → 5001", "RETRY_DELAY_MS = 5000", "RETRY_DELAY_MS = 5001");
+add(702, "constant 2 → 1", "RETRY_MAX = 2", "RETRY_MAX = 1");
+add(702, "constant 2 → 3", "RETRY_MAX = 2", "RETRY_MAX = 3");
+add(704, "default `scrape = scrapeCategory` removed", "scrape = scrapeCategory", "scrape");
+add(704, "default `sleep = sleepSync` removed", "sleep = sleepSync", "sleep");
+add(704, "default `logFn = log` removed", "logFn = log", "logFn");
+add(704, "default `= {}` removed", "} = {})", "})");
+add(705, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;");
+add(708, "`<=` → `<`", "attempt <= RETRY_MAX;", "attempt < RETRY_MAX;");
+add(708, "bound − 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX - 1;");
+add(708, "bound + 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX + 1;");
+add(708, "start 0 → 1", "let attempt = 0;", "let attempt = 1;");
+add(708, "start 0 → −1", "let attempt = 0;", "let attempt = -1;");
+add(708, "loop cut to its first element", "attempt <= RETRY_MAX;", "attempt <= 0;");
+add(708, "loop exits early", "attempt++) {", "attempt++) { break;");
+add(708, "loop reversed", "let attempt = 0; attempt <= RETRY_MAX; attempt++", "let attempt = RETRY_MAX; attempt >= 0; attempt--");
+cond(709, "attempt > 0");
+add(709, "`>` → `>=`", "attempt > 0", "attempt >= 0");
+add(709, "constant 0 → 1", "attempt > 0", "attempt > 1");
+add(709, "constant 0 → −1", "attempt > 0", "attempt > -1");
+add(716, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
+cond(718, "e.botChallenge");
+add(719, "flag true → false", "blocked = true;", "blocked = false;");
+add(721, "challenge stop removed (`break` deleted)", "break;", "");
+cond(724, "result.count > 0");
+add(724, "`>` → `>=`", "result.count > 0", "result.count >= 0");
+add(724, "constant 0 → 1", "result.count > 0", "result.count > 1");
+add(724, "constant 0 → −1", "result.count > 0", "result.count > -1");
+cond(725, "attempt < RETRY_MAX");
+add(725, "`<` → `<=`", "attempt < RETRY_MAX", "attempt <= RETRY_MAX");
+add(725, "bound − 1", "attempt < RETRY_MAX", "attempt < RETRY_MAX - 1");
+add(725, "bound + 1", "attempt < RETRY_MAX", "attempt < RETRY_MAX + 1");
+ternary(727, "attempts > 1");
+add(727, "`>` → `>=`", "attempts > 1", "attempts >= 1");
+add(727, "constant 1 → 0", "attempts > 1", "attempts > 0");
+add(727, "constant 1 → 2", "attempts > 1", "attempts > 2");
+
+// ── Runner ──────────────────────────────────────────────────────────
+let shutdown = false;
+let running = null;
+
+function git(args) {
+  return execFileSync("git", args, { cwd: ROOT, maxBuffer: 16 * 1024 * 1024 });
+}
+
+function refuse(message) {
+  console.error(`REFUSED: ${message}`);
+  process.exit(2);
+}
+
+function mutate(source, lineStarts, m) {
+  const start = lineStarts[m.line - 1];
+  const next = lineStarts[m.line] ?? source.length + 1;
+  const index = start === undefined ? -1 : source.indexOf(m.from, start);
+  if (index < 0 || index >= next) {
+    throw new Error(`#${m.id} ${m.fn} L${m.line}: ${JSON.stringify(m.from)} does not start on line ${m.line}`);
+  }
+  return source.slice(0, index) + m.to + source.slice(index + m.from.length);
+}
+
+function compiles(source) {
+  try {
+    vm.compileFunction(source.replace(/^#!/, "//"), ["exports", "require", "module", "__filename", "__dirname"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function killGroup(child) {
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch { /* already gone */ }
+}
+
+// Runs the whole suite in its own process group, so a timeout or Ctrl-C can
+// kill every test file and the children they spawn.
+function runSuite() {
+  return new Promise((resolve) => {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(process.execPath, ["--test", "--test-reporter=tap"], {
+      cwd: ROOT,
+      env,
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    running = child;
+    let out = "";
+    let timedOut = false;
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup(child);
+    }, TIMEOUT_MS);
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      running = null;
+      const failed = [...out.matchAll(/^\s*not ok \d+ - (.+)$/gm)].map((match) => match[1].replace(ROOT + path.sep, ""));
+      resolve({ status, timedOut, failed: [...new Set(failed)].sort() });
+    });
+  });
+}
+
+function classify(m, run) {
+  if (run.timedOut || run.status !== 0) {
+    let text = `killed (exit ${run.status})`;
+    if (run.timedOut) text = "killed (timeout)";
+    else if (run.failed.length) text = `killed by "${run.failed[0]}"${run.failed.length > 1 ? ` (+${run.failed.length - 1} more)` : ""}`;
+    return { kind: "killed", text, stale: Boolean(m.note) };
+  }
+  if (m.note?.eq) return { kind: "equivalent", text: `equivalent: ${m.note.eq}` };
+  if (m.note?.needs) return { kind: "needs", text: `needs code: ${m.note.needs}` };
+  return { kind: "survived", text: "SURVIVED" };
+}
+
+async function main() {
+  if (process.env.NODE_TEST_CONTEXT) return; // collected by a test runner by mistake
+  const only = process.argv[2];
+
+  const head = git(["rev-parse", "HEAD"]).toString().trim();
+  const headBlob = git(["show", `HEAD:${REL}`]);
+  if (!headBlob.equals(git(["show", `${PINNED}:${REL}`]))) {
+    refuse(`${REL} at HEAD ${head.slice(0, 7)} differs from the pinned head ${PINNED.slice(0, 7)}`);
+  }
+  if (!fs.readFileSync(TARGET).equals(headBlob)) {
+    refuse(`${REL} differs from HEAD; restore it (git checkout -- ${REL}) and run again`);
+  }
+
+  const original = headBlob.toString("utf8");
+  const lineStarts = [0];
+  for (let i = 0; i < original.length; i++) if (original[i] === "\n") lineStarts.push(i + 1);
+  const seen = new Set();
+  for (const m of MUTANTS) {
+    m.source = mutate(original, lineStarts, m);
+    if (!compiles(m.source)) throw new Error(`#${m.id} ${m.fn} L${m.line} "${m.what}": the mutated file does not compile`);
+    const key = `${m.line}\0${m.from}\0${m.to}`;
+    if (seen.has(key)) throw new Error(`#${m.id} ${m.fn} L${m.line}: duplicate mutant`);
+    seen.add(key);
+  }
+  const selected = only ? MUTANTS.filter((m) => m.fn === only) : MUTANTS;
+  if (selected.length === 0) refuse(`no mutants for ${JSON.stringify(only)}`);
+
+  const baseline = await runSuite();
+  if (baseline.timedOut || baseline.status !== 0) refuse(`the unmutated suite fails: ${baseline.failed.join("; ")}`);
+
+  const started = Date.now();
+  console.log(`HEAD ${head}; ${REL} is byte-identical to ${PINNED.slice(0, 7)}; ${selected.length} mutant(s)${only ? ` in ${only}` : ""}`);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "news-mutants-"));
+  const backup = path.join(tmp, "daily-news.js.orig");
+  fs.copyFileSync(TARGET, backup);
+  const rows = [];
+  try {
+    for (const m of selected) {
+      if (shutdown) break;
+      fs.writeFileSync(TARGET, m.source);
+      let run;
+      try {
+        run = await runSuite();
+      } finally {
+        fs.copyFileSync(backup, TARGET);
+      }
+      if (shutdown) break;
+      const row = { m, run, ...classify(m, run) };
+      rows.push(row);
+      const stale = row.stale ? `  [STALE NOTE: annotated ${m.note.eq ? "equivalent" : "needs code"}, but killed]` : "";
+      console.log(`#${m.id} L${m.line} ${m.fn}: ${m.what} → ${row.text}${stale}`);
+    }
+  } finally {
+    fs.copyFileSync(backup, TARGET);
+  }
+  if (!fs.readFileSync(TARGET).equals(git(["show", `HEAD:${REL}`]))) {
+    refuse(`${REL} does not match HEAD after the run; the backup is ${backup}`);
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+  if (shutdown) {
+    console.error(`Interrupted after ${rows.length} mutant(s); ${REL} is restored. No SUMMARY.`);
+    process.exit(130);
+  }
+
+  const count = (kind) => rows.filter((row) => row.kind === kind).length;
+  const needsCount = count("needs");
+  const unexplained = count("survived");
+  const stale = rows.filter((row) => row.stale).length;
+
+  // Every test that killed something, and how many mutants only it kills.
+  const kills = new Map();
+  for (const row of rows) {
+    for (const name of row.run.failed) {
+      const entry = kills.get(name) ?? { all: 0, sole: 0 };
+      entry.all++;
+      if (row.run.failed.length === 1) entry.sole++;
+      kills.set(name, entry);
+    }
+  }
+  console.log("\nKILLS PER TEST (all / sole killer)");
+  for (const [name, entry] of [...kills].sort((a, b) => a[0].localeCompare(b[0]))) {
+    console.log(`  ${String(entry.all).padStart(3)} / ${String(entry.sole).padStart(3)}  ${name}`);
+  }
+  console.log("");
+  for (const [symbol, text] of Object.entries(NEEDS_CODE)) {
+    if (rows.some((row) => row.kind === "needs" && row.m.note.needs === symbol)) console.log(text);
+  }
+  if (stale) console.log(`${stale} STALE NOTE(S): an equivalent or needs-code mutant was killed; fix its note.`);
+  console.log(`(${Math.round((Date.now() - started) / 1000)} s)`);
+  console.log(`SUMMARY total ${rows.length} killed ${count("killed")} survived ${needsCount + unexplained} equivalent ${count("equivalent")} (survived: ${needsCount} needs code, ${unexplained} unexplained)${only ? ` [only ${only}]` : ""}`);
+  process.exitCode = unexplained || stale ? 1 : 0;
+}
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    shutdown = true;
+    if (running) killGroup(running);
+  });
+}
+
+main().catch((err) => {
+  console.error(`ERROR: ${err.message}`);
+  process.exit(2);
+});
