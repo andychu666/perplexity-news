@@ -163,7 +163,6 @@ add(669, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
 ternary(675, "cmd === XVFB_RUN");
 
 group("main", needs("main"));
-const emptyFeed = "with no feed items apiByTitle is empty, so every lookup misses and nothing changes";
 add(745, "reset false → true", "let blocked = false;", "let blocked = true;");
 cond(751, "e.botChallenge");
 add(751, "flag true → false", "blocked = true;", "blocked = false;");
@@ -179,13 +178,15 @@ add(771, "constant 0 → 1", "topCards.length > 0", "topCards.length > 1");
 add(771, "constant 0 → −1", "topCards.length > 0", "topCards.length > -1");
 cond(778, "scraped.blocked");
 add(778, "flag true → false", "blocked = true;", "blocked = false;");
+// With an empty feed the next three still differ: the backfill loop then
+// reads result.cards, which a malformed scrape result may lack.
 cond(783, "!servedByApi && feedItems.length > 0");
 add(783, "`servedByApi` operand deleted", "!servedByApi && ", "");
-add(783, "`length` operand deleted", " && feedItems.length > 0", "", eq(emptyFeed));
+add(783, "`length` operand deleted", " && feedItems.length > 0", "");
 add(783, "all → any (`&&` → `||`)", "!servedByApi && feedItems", "!servedByApi || feedItems");
-add(783, "`>` → `>=`", "feedItems.length > 0", "feedItems.length >= 0", eq(emptyFeed));
+add(783, "`>` → `>=`", "feedItems.length > 0", "feedItems.length >= 0");
 add(783, "constant 0 → 1", "feedItems.length > 0", "feedItems.length > 1");
-add(783, "constant 0 → −1", "feedItems.length > 0", "feedItems.length > -1", eq(emptyFeed));
+add(783, "constant 0 → −1", "feedItems.length > 0", "feedItems.length > -1");
 cond(787, "!key || card.published");
 add(787, "`!key` operand deleted", "!key || ", "", eq("apiByTitle never holds an empty key (L760), so the lookup misses"));
 add(787, "`published` operand deleted", " || card.published", "");
