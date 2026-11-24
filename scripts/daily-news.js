@@ -820,7 +820,7 @@ function collectDigest({
   const topCards = selectTopApiCards(apiCards);
   const allData = {};
   for (const cat of CATEGORIES) {
-    let result = { count: 0, cards: [] };
+    let result;
     let servedByApi = false;
 
     // The API exposes one general feed, so it can serve the Top section outright;
@@ -843,7 +843,7 @@ function collectDigest({
         const key = normalizeTitle(card.headline);
         if (card.published) continue;
         const hit = apiByTitle.get(key);
-        if (hit && hit.published) {
+        if (hit) {
           card.published = hit.published;
           filled++;
         }
