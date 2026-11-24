@@ -104,3 +104,49 @@ test("published leaf without valid date pattern is not captured", () => {
   assert.equal(card.sources, "15");
   assert.equal(card.headline, "Some headline that is long enough");
 });
+
+test("a headline after the source count is still found", () => {
+  const card = parseCardFromLeaves(["12 sources", "Headline that follows the source count"]);
+  assert.equal(card.headline, "Headline that follows the source count");
+  assert.equal(card.sources, "12");
+});
+
+test("a Published leaf before the headline is still read", () => {
+  const card = parseCardFromLeaves(["Published", "2 hours ago", "Headline that follows the publish time", "3 sources"]);
+  assert.equal(card.published, "2 hours ago");
+  assert.equal(card.headline, "Headline that follows the publish time");
+  assert.equal(card.sources, "3");
+});
+
+test("a publish time in the last leaf is captured", () => {
+  const card = parseCardFromLeaves(["Some headline that is long enough", "Published", "2 hours ago"]);
+  assert.equal(card.headline, "Some headline that is long enough");
+  assert.equal(card.published, "2 hours ago");
+  assert.equal(card.sources, null);
+});
+
+test("the first source count and the first Published leaf win", () => {
+  const card = parseCardFromLeaves([
+    "Headline that is long enough",
+    "Published",
+    "1 hour ago",
+    "Published",
+    "Jul 9, 2026",
+    "3 sources",
+    "7 sources",
+  ]);
+  assert.equal(card.published, "1 hour ago");
+  assert.equal(card.sources, "3");
+});
+
+test("a leaf that ends with a source count is not the count", () => {
+  const card = parseCardFromLeaves(["Analysts compared 12 sources", "3 sources"]);
+  assert.equal(card.sources, "3");
+  assert.equal(card.headline, "Analysts compared 12 sources");
+});
+
+test("a leaf that starts with a source count is not the count", () => {
+  const card = parseCardFromLeaves(["10 sources of inflation to watch", "4 sources"]);
+  assert.equal(card.sources, "4");
+  assert.equal(card.headline, "10 sources of inflation to watch");
+});

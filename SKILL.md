@@ -22,7 +22,8 @@ Output: `~/Downloads/perplexity-news-YYYY-MM-DD.html`
 
 ## Prerequisites
 
-- Chrome running with remote debugging on `:9222`
+- Chrome or Chromium with remote debugging on `:9222`. The script reuses a running browser.
+- Install `xvfb` for unattended runs. The script starts headed Chrome in a virtual display through `xvfb-run` and falls back to headless Chrome when `xvfb-run` is unavailable.
 - `puppeteer-core` installed (shared with browser-tools skill)
 
 ## Cron Setup
@@ -52,7 +53,7 @@ Produces `perplexity-news-YYYY-MM-DD-morning.html` and `perplexity-news-YYYY-MM-
 | `--out <dir>` | `~/Downloads` | Output directory |
 | `--limit <N>` | `10` | Cards per category |
 | `--open` | — | Open the HTML file after generation (xdg-open) |
-| `--suffix <str>` | `""` | Append a label to the filename, e.g. `--suffix morning` → `perplexity-news-2026-06-11-morning.html` |
+| `--suffix <str>` | `""` | Append a label to the filename, e.g. `--suffix morning` → `perplexity-news-2026-06-11-morning.html`. Use one or more ASCII letters, digits, hyphens, or underscores. |
 
 ## Category URLs Scraped
 
@@ -75,6 +76,7 @@ Dark-themed responsive layout with:
 
 ## Troubleshooting
 
+- **Cloudflare bot challenge**. If a headless Chrome is already listening on `:9222`, close it and rerun with `xvfb` installed or start a headed Chrome yourself.
 - **"Could not connect to browser"**: Start Chrome with `browser-start.js` from browser-tools skill
 - **0 cards for a category**: Perplexity may have changed the URL structure; check with `curl`
 - **Login**: Not required — Discover feeds are public pages, no account needed

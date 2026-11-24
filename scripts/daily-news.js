@@ -8,7 +8,7 @@
  * Usage: node daily-news.js [--out ~/Downloads] [--limit 10] [--open]
  */
 
-const { execSync, spawn } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -52,10 +52,16 @@ function parseArgs(argv) {
       case "--open":
         opts.open = true;
         break;
-      case "--suffix":
-        if (i + 1 >= argv.length) { console.error("ERROR: --suffix requires a string"); process.exit(1); }
-        opts.suffix = argv[++i];
+      case "--suffix": {
+        // The suffix becomes part of the output filename.
+        const suffix = argv[++i] ?? "";
+        if (!suffix || /[^A-Za-z0-9_-]/.test(suffix)) {
+          console.error(`ERROR: --suffix may only contain letters, digits, - and _ (got ${JSON.stringify(suffix)})`);
+          process.exit(1);
+        }
+        opts.suffix = suffix;
         break;
+      }
       default:
         console.error("Unknown flag:", argv[i]);
         process.exit(1);
@@ -69,8 +75,9 @@ function log(msg) {
   process.stderr.write("[news] " + msg + "\n");
 }
 
+// Native sleep: no shell, no subprocess spawned per poll.
 function sleepSync(ms) {
-  execSync(`sleep ${ms / 1000}`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function waitForHydratedCards({
@@ -118,17 +125,17 @@ function waitForHydratedCards({
 // Perplexity card leaves: headline, "Published" (optional), date/time (optional),
 // description (optional), "N sources".
 function parseCardFromLeaves(leafTexts) {
-  var sources = null;
-  var sourcesIdx = -1;
-  for (var i = 0; i < leafTexts.length; i++) {
-    var m = leafTexts[i].match(/^(\d+)\s*sources?$/i);
+  let sources = null;
+  let sourcesIdx = -1;
+  for (let i = 0; i < leafTexts.length; i++) {
+    const m = leafTexts[i].match(/^(\d+)\s*sources?$/i);
     if (m) { sources = m[1]; sourcesIdx = i; break; }
   }
 
-  var published = null;
-  for (var i = 0; i < leafTexts.length - 1; i++) {
+  let published = null;
+  for (let i = 0; i < leafTexts.length - 1; i++) {
     if (/^Published$/i.test(leafTexts[i])) {
-      var candidate = leafTexts[i + 1];
+      const candidate = leafTexts[i + 1];
       if (/^\d+\s*(?:hours?|minutes?|days?)\s*ago$/i.test(candidate) ||
           /^[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}$/.test(candidate)) {
         published = candidate;
@@ -137,8 +144,8 @@ function parseCardFromLeaves(leafTexts) {
     }
   }
 
-  var headline = null;
-  for (var i = 0; i < leafTexts.length; i++) {
+  let headline = null;
+  for (let i = 0; i < leafTexts.length; i++) {
     if (i === sourcesIdx) continue;
     if (/^Published$/i.test(leafTexts[i])) continue;
     if (published && leafTexts[i] === published) continue;
@@ -151,6 +158,31 @@ function parseCardFromLeaves(leafTexts) {
   return { headline: headline, published: published, sources: sources };
 }
 
+// ── Bot challenge ───────────────────────────────────────────────────
+// Cloudflare's managed challenge: the page title is "Just a moment..." and
+// API responses carry `cf-mitigated: challenge`. A headed Chrome passes it on
+// its own within a few seconds; the script only waits and reports, it never
+// tries to solve or evade it.
+function isChallengeTitle(title) {
+  return /^just a moment/i.test(String(title).trim());
+}
+
+function botChallengeError(message) {
+  const err = new Error(`bot challenge: ${message}`);
+  err.botChallenge = true;
+  return err;
+}
+
+function noCardsMessage(blocked) {
+  return blocked
+    ? "ERROR: No cards scraped. Perplexity answered with a Cloudflare bot challenge (see the log above)."
+    : "ERROR: No cards scraped. Check Chrome and Perplexity availability.";
+}
+
+function pageTitle() {
+  return execFileSync(EVAL, ["document.title"], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }).trim();
+}
+
 // ── Scrape one category ─────────────────────────────────────────────
 function scrapeCategory(cat) {
   const url = `https://www.perplexity.ai/discover/${cat.id}`;
@@ -161,17 +193,24 @@ function scrapeCategory(cat) {
   // Navigate
   const catPath = `/discover/${cat.id}/`;
 
-  execSync(`"${NAV}" "${url}" 2>&1`, { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
+  execFileSync(NAV, [url], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" });
 
   // Poll for card hydration instead of a fixed sleep — Perplexity is a React
   // SPA and hydration time varies (slow network / busy Chrome). Without this,
   // categories can intermittently return 0 cards (as happened in the night run).
   const countJS = `document.querySelectorAll('a[href*="${catPath}"]').length`;
-  const safeCountJS = countJS.replace(/'/g, "'\\''");
-  waitForHydratedCards({
+  const { cardCount } = waitForHydratedCards({
     categoryName: cat.name,
-    evaluateCount: () => execSync(`"${EVAL}" '${safeCountJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
+    evaluateCount: () => execFileSync(EVAL, [countJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" }),
   });
+  // No cards after the full wait: if the tab is still on Cloudflare's
+  // interstitial, say so instead of extracting an empty page and retrying.
+  if (cardCount === 0) {
+    const title = pageTitle();
+    if (isChallengeTitle(title)) {
+      throw botChallengeError(`page is a Cloudflare interstitial (title "${title}")`);
+    }
+  }
   // Inject parseCardFromLeaves so the browser runs the exact same logic
   // that unit tests exercise — no duplicated regexes.
   const extractJS = `
@@ -199,18 +238,22 @@ function scrapeCategory(cat) {
   return JSON.stringify({ count: cards.length, cards: cards });
 })()`;
 
-  const safeJS = extractJS.replace(/'/g, "'\\''");
-  const raw = execSync(`"${EVAL}" '${safeJS}' 2>&1`, { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" });
+  // execFileSync passes argv straight through: no shell, so nothing in the JS
+  // (or a future backslash/quote) can break out of the command.
+  const raw = execFileSync(EVAL, [extractJS], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8" });
 
+  let result;
   try {
-    return JSON.parse(raw);
+    result = JSON.parse(raw);
   } catch (e) {
     log(`  Parse error for ${cat.name}: ${e.message}`);
-    // Try extracting JSON from stderr-free output
     const match = raw.match(/(\{[\s\S]*\})/);
-    if (match) return JSON.parse(match[1]);
-    return { count: 0, cards: [] };
+    if (match) {
+      try { result = JSON.parse(match[1]); } catch { /* truncated output */ }
+    }
   }
+  return Number.isInteger(result?.count) && result.count >= 0 && Array.isArray(result.cards)
+    ? result : { count: 0, cards: [] };
 }
 
 // ── API path (primary) ──────────────────────────────────────────────
@@ -221,89 +264,122 @@ function scrapeCategory(cat) {
 
 const CDP_URL = process.env.PERPLEXITY_CDP || "http://127.0.0.1:9222";
 const ORIGIN = "https://www.perplexity.ai";
+// Kept together so a server-side version bump is a one-line change.
+const FEED_VERSION = "2.18";
+const FEED_SOURCE = "default";
+const CHALLENGE_WAIT_MS = 30000;
 
-async function cdpSessionCookies() {
-  const targets = await (await fetch(`${CDP_URL}/json/list`)).json();
-  const page = targets.find((t) => t.type === "page" && /perplexity\.ai/.test(t.url || ""))
-    || targets.find((t) => t.type === "page");
-  if (!page || !page.webSocketDebuggerUrl) throw new Error("no CDP page target");
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    ws.onopen = res;
-    ws.onerror = () => rej(new Error("CDP websocket failed"));
-  });
-  try {
-    // Network.getCookies is only exposed on a page target.
-    return await new Promise((res, rej) => {
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.id !== 1) return;
-        if (msg.error) rej(new Error(JSON.stringify(msg.error)));
-        else res(msg.result.cookies || []);
-      };
-      ws.send(JSON.stringify({ id: 1, method: "Network.getCookies", params: { urls: [ORIGIN] } }));
-      setTimeout(() => rej(new Error("CDP getCookies timed out")), 15000);
-    });
-  } finally {
-    ws.close();
+// The API call needs a tab on perplexity.ai that is past the interstitial.
+// browser-eval fails while the challenge reloads the page, so a failed read
+// counts as "still waiting".
+function openDiscoverTab({
+  nav = (url) => execFileSync(NAV, [url], { timeout: EVAL_TIMEOUT_MS, stdio: "pipe" }),
+  title: readTitle = pageTitle,
+  sleep = sleepSync,
+} = {}) {
+  nav(`${ORIGIN}/discover/top`);
+  let readSucceeded = false;
+  let lastError;
+  let challengeTitle;
+  for (let waited = 0; waited <= CHALLENGE_WAIT_MS; waited += 1000) {
+    try {
+      const title = readTitle().trim();
+      readSucceeded = true;
+      if (title) {
+        if (!isChallengeTitle(title)) return;
+        challengeTitle = title;
+      }
+    } catch (e) {
+      lastError = e;
+    }
+    sleep(1000);
   }
+  if (!readSucceeded) {
+    throw new Error(`Could not read Discover page title: ${lastError?.message ?? String(lastError)}`);
+  }
+  if (challengeTitle) {
+    throw botChallengeError(`page is a Cloudflare interstitial (title "${challengeTitle}")`);
+  }
+  throw new Error("Discover page title stayed empty");
 }
 
-async function apiGet(pathname, cookies) {
-  const csrf = cookies.find((c) => /csrf/i.test(c.name));
-  const res = await fetch(`${ORIGIN}${pathname}`, {
-    headers: {
-      cookie: cookies.map((c) => `${c.name}=${c.value}`).join("; "),
-      accept: "application/json, text/plain, */*",
-      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-      ...(csrf ? { "x-csrf-token": csrf.value.split("|")[0] } : {}),
-    },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+// The fetch runs inside the Discover tab, so it carries the browser's own
+// cookies and Cloudflare clearance. A Node-side fetch with copied cookies is
+// challenged even when the tab is not (verified 2026-11-24).
+function browserEval(js) {
+  return execFileSync(EVAL, [js], { timeout: EVAL_TIMEOUT_MS, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
 
-// Mirrors the UI's wording ("13 hours ago") so the rendered HTML is unchanged.
-function relativeTime(iso) {
+function apiGet(pathname, evalFn = browserEval) {
+  const js = `(async () => {
+    const r = await fetch(${JSON.stringify(pathname)}, { headers: { accept: "application/json" } });
+    return JSON.stringify({ status: r.status, mitigated: r.headers.get("cf-mitigated"), body: r.ok ? await r.json() : null });
+  })()`;
+  const res = JSON.parse(evalFn(js));
+  if (res.status < 200 || res.status >= 300) {
+    if (res.mitigated === "challenge") throw botChallengeError(`HTTP ${res.status} (cf-mitigated: challenge)`);
+    throw new Error(`HTTP ${res.status}${res.mitigated ? ` (cf-mitigated: ${res.mitigated})` : ""}`);
+  }
+  return res.body;
+}
+
+// Mirrors the UI's wording ("13 hours ago", "1 hour ago") so the rendered HTML
+// matches, including singular units and clock-skewed (future) timestamps.
+function relativeTime(iso, now = Date.now()) {
   if (!iso) return null;
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return null;
-  const minutes = Math.round((Date.now() - then) / 60000);
-  if (minutes < 60) return `${Math.max(1, minutes)} minutes ago`;
+  const minutes = Math.round((now - then) / 60000);
+  if (minutes <= 0) return "just now";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} hours ago`;
-  return `${Math.round(hours / 24)} days ago`;
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function apiCard(item) {
+  if (!item || typeof item !== "object") return null;
   const preview = item.web_results_preview || {};
   const image = (item.featured_images && item.featured_images[0]) || null;
   return {
     headline: item.title || item.short_title || "",
     published: relativeTime(item.published_timestamp || item.updated_datetime),
-    sources: preview.total_count != null ? String(preview.total_count) : null,
+    sources: preview.total_count !== null && preview.total_count !== undefined
+      ? String(preview.total_count) : null,
     href: item.url || (item.slug ? `${ORIGIN}/discover/${item.slug}` : "#"),
     imgSrc: (image && (image.image || image.thumbnail)) || null,
   };
 }
 
-async function fetchFeedItems({ pages = 2, perPage = 100 } = {}) {
-  const cookies = await cdpSessionCookies();
+function selectTopApiCards(cards) {
+  return cards.filter((card) => typeof card?.headline === "string" && card.headline.trim());
+}
+
+function fetchFeedItems({ pages = 2, perPage = 100, get = apiGet, logFn = log } = {}) {
   const items = [];
   for (let i = 0; i < pages; i++) {
-    const body = await apiGet(
-      `/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=2.18&source=default`,
-      cookies
-    );
-    const batch = body.items || [];
-    items.push(...batch);
+    let body;
+    try {
+      body = get(`/rest/discover/feed?limit=${perPage}&offset=${i * perPage}&version=${FEED_VERSION}&source=${FEED_SOURCE}`);
+    } catch (e) {
+      // A failed first page is the API failing: throw so the cause is logged.
+      // A failed later page must not discard the pages already in hand.
+      if (i === 0) throw e;
+      logFn(`API page ${i + 1} failed (${e.message}); keeping ${items.length} item(s)`);
+      break;
+    }
+    const batch = body && Array.isArray(body.items) ? body.items : [];
+    items.push(...batch.filter((entry) => entry && typeof entry === "object"));
     if (batch.length < perPage) break;
   }
   return items;
 }
 
+// Keep Unicode letters/digits: the feed carries non-English headlines, and
+// stripping them would collapse distinct items onto the same key.
 function normalizeTitle(text) {
-  return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return String(text || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 // ── HTML generators ─────────────────────────────────────────────────
@@ -315,12 +391,26 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+// Only http(s) links may end up in the digest: a scraped javascript:/data: URL
+// would survive HTML escaping and become a live anchor.
+function safeUrl(value) {
+  const raw = String(value).trim();
+  try {
+    const protocol = new URL(raw).protocol;
+    return protocol === "http:" || protocol === "https:" ? raw : "";
+  } catch {
+    return "";
+  }
+}
+
 function cardHtml(card) {
   const headline = escapeHtml(card.headline || "");
-  const url = escapeHtml(card.href || "#");
-  const imgSrc = card.imgSrc ? escapeHtml(card.imgSrc) : "";
+  const url = escapeHtml(safeUrl(card.href) || "#");
+  const imgSrc = escapeHtml(safeUrl(card.imgSrc));
   const published = card.published ? `🕐 ${escapeHtml(card.published)}` : "";
-  const sources = card.sources ? `📊 ${card.sources} sources` : "";
+  const sources = card.sources
+    ? `📊 ${escapeHtml(String(card.sources))} source${String(card.sources) === "1" ? "" : "s"}`
+    : "";
   const meta = [published, sources].filter(Boolean).join(" · ");
 
   const imgHtml = imgSrc
@@ -481,14 +571,108 @@ ${sections}
 }
 
 // ── Chrome lifecycle ───────────────────────────────────────────────────
-function ensureChrome() {
-  // Already running?
+function isProcessAlive(pid) {
   try {
-    execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
-    return;
-  } catch { /* not running */ }
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM also means the process exists. Keep the lock if in doubt.
+    return e.code !== "ESRCH";
+  }
+}
 
-  // Find Chrome binary
+function clearStaleLocks(dir, { hostname = os.hostname(), isAlive = isProcessAlive, logFn = log } = {}) {
+  const lockPath = path.join(dir, "SingletonLock");
+  let target;
+  try {
+    target = fs.readlinkSync(lockPath);
+  } catch (e) {
+    if (e.code !== "ENOENT") logFn(`Keeping SingletonLock: cannot read symlink — ${e.message}`);
+    return;
+  }
+
+  const separator = target.lastIndexOf("-");
+  const lockHost = target.slice(0, separator);
+  const pidText = target.slice(separator + 1);
+  const pid = Number(pidText);
+  if (separator <= 0 || !/^[0-9]+$/.test(pidText) || pid <= 0 || pid > 0x7fffffff) {
+    logFn(`Keeping SingletonLock: malformed symlink target ${JSON.stringify(target)}`);
+    return;
+  }
+  if (lockHost !== hostname) {
+    logFn(`Keeping SingletonLock: profile belongs to host ${lockHost}`);
+    return;
+  }
+  if (isAlive(pid) !== false) {
+    logFn(`Keeping SingletonLock: PID ${pid} may still be running`);
+    return;
+  }
+
+  // Check for a new owner after probing the PID. Remove the ownership marker
+  // last so Chrome is less likely to claim the profile mid-cleanup.
+  try {
+    if (fs.readlinkSync(lockPath) !== target) {
+      logFn("Keeping SingletonLock: symlink target changed during cleanup");
+      return;
+    }
+  } catch (e) {
+    if (e.code !== "ENOENT") logFn(`Keeping SingletonLock: cannot recheck symlink — ${e.message}`);
+    return;
+  }
+  for (const entry of ["SingletonSocket", "SingletonCookie", "SingletonLock"]) {
+    try {
+      fs.unlinkSync(path.join(dir, entry));
+      logFn(`Removed stale ${entry}`);
+    } catch (e) {
+      if (e.code !== "ENOENT") logFn(`Warning: cannot remove ${entry} — ${e.message}`);
+    }
+  }
+}
+
+const XVFB_RUN = "/usr/bin/xvfb-run";
+
+function cdpPort(url) {
+  const { port, protocol } = new URL(url);
+  if (port) return port;
+  if (protocol === "http:") return "80";
+  if (protocol === "https:") return "443";
+  return "9222";
+}
+
+function headlessWarning(versionText) {
+  if (/HeadlessChrome/.test(versionText)) {
+    return "Warning: the Chrome on the CDP port is headless, and Cloudflare challenges headless Chrome. Close it to let the next run start a headed one.";
+  }
+  return null;
+}
+
+function chromeCommand({ chromeBin, port, userDataDir, hasXvfb }) {
+  const chromeArgs = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+  ];
+  if (hasXvfb) {
+    return {
+      cmd: XVFB_RUN,
+      args: ["-a", "-s", "-screen 0 1280x900x24", chromeBin, "--ozone-platform=x11", ...chromeArgs],
+    };
+  }
+  return { cmd: chromeBin, args: [...chromeArgs, "--headless=new"] };
+}
+
+function prepareChromeLaunch({
+  cdpUrl = CDP_URL,
+  userDataDir: profileDir,
+  access = fs.accessSync,
+  mkdir = fs.mkdirSync,
+  clearLocks = clearStaleLocks,
+  logFn = log,
+} = {}) {
   const candidates = [
     "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
@@ -499,43 +683,66 @@ function ensureChrome() {
   let chromeBin = null;
   for (const c of candidates) {
     try {
-      execSync(`test -x "${c}"`);
+      access(c, fs.constants.X_OK);
       chromeBin = c;
       break;
     } catch { /* not found */ }
   }
   if (!chromeBin) {
-    log("ERROR: No Chrome/Chromium binary found. Tried: " + candidates.join(", "));
-    process.exit(1);
+    logFn("ERROR: No Chrome/Chromium binary found. Tried: " + candidates.join(", "));
+    return null;
   }
 
-  const userDataDir = path.join(os.homedir(), ".cache", "browser-tools");
-  fs.mkdirSync(userDataDir, { recursive: true });
+  const userDataDir = profileDir ?? path.join(os.homedir(), ".cache", "browser-tools");
+  mkdir(userDataDir, { recursive: true });
+  clearLocks(userDataDir, { logFn });
 
-  // Kill any stale lock files that prevent Chrome from starting
-  for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
-    try { fs.unlinkSync(path.join(userDataDir, lock)); } catch (e) {
-      if (e.code !== "ENOENT") log(`Warning: cannot remove ${lock} \u2014 ${e.message}`);
-    }
+  const port = cdpPort(cdpUrl);
+  // Cloudflare challenges headless Chrome but lets a headed one through, so
+  // run headed inside a virtual X display: no window on the desktop, and no
+  // login session needed.
+  let hasXvfb = true;
+  try {
+    access(XVFB_RUN, fs.constants.X_OK);
+  } catch {
+    logFn(`Warning: ${XVFB_RUN} not found; starting headless Chrome, which Cloudflare may challenge (install xvfb)`);
+    hasXvfb = false;
   }
 
-  log(`Starting Chrome (${chromeBin})...`);
-  const child = spawn(chromeBin, [
-    "--remote-debugging-port=9222",
-    `--user-data-dir=${userDataDir}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--headless=new",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--no-sandbox",
-  ], { detached: true, stdio: "ignore" });
-  child.unref();
+  const { cmd, args } = chromeCommand({ chromeBin, port, userDataDir, hasXvfb });
+  logFn(`Starting Chrome (${chromeBin}${cmd === XVFB_RUN ? " under xvfb-run" : ", headless"})...`);
+  return { cmd, args, port };
+}
+
+async function ensureChrome() {
+  // Already running?
+  try {
+    const version = execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    // Not closed here: another tool may own it. Without it, the next run
+    // starts a headed Chrome (see below).
+    const warning = headlessWarning(version);
+    if (warning) log(warning);
+    return;
+  } catch { /* not running */ }
+
+  const launch = prepareChromeLaunch();
+  if (!launch) process.exit(1);
+  const { cmd, args, port } = launch;
+  const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
+  // Let the spawn result arrive before the synchronous readiness loop.
+  await new Promise((resolve) => {
+    child.once("spawn", resolve);
+    child.once("error", (error) => {
+      log(`Warning: could not start Chrome (${error.message})`);
+      resolve();
+    });
+    child.unref();
+  });
   let firstError = null;
   for (let i = 0; i < 60; i++) {
     try {
-      execSync("curl -sS --max-time 5 --connect-timeout 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1", { timeout: 8000 });
-      log("Chrome ready on :9222");
+      execFileSync("curl", ["-sS", "--max-time", "5", "--connect-timeout", "3", `${CDP_URL}/json/version`], { timeout: 8000, stdio: "ignore" });
+      log(`Chrome ready on :${port}`);
       return;
     } catch (e) {
       firstError ??= e;
@@ -544,11 +751,119 @@ function ensureChrome() {
     if (i === 12 && firstError) {
       log(`Chrome not ready after 6s — last curl error: ${firstError.message || firstError.stderr || firstError}`);
     }
-    execSync("sleep 0.5");
+    sleepSync(500);
   }
 
   log("ERROR: Chrome failed to start within 30 seconds");
   process.exit(1);
+}
+
+// ── Retry loop ──────────────────────────────────────────────────────
+// Retries a category that came back empty. A bot challenge stops the retries
+// for that category: retrying only repeats the same challenged request.
+const RETRY_DELAY_MS = 5000;
+const RETRY_MAX = 2;
+
+function scrapeWithRetries(cat, { scrape = scrapeCategory, sleep = sleepSync, logFn = log } = {}) {
+  let result = { count: 0, cards: [] };
+  let attempts = 0;
+  let blocked = false;
+  for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
+    if (attempt > 0) {
+      logFn(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
+      sleep(RETRY_DELAY_MS);
+    }
+    attempts++;
+    try {
+      result = scrape(cat);
+    } catch (e) {
+      logFn(`  ${cat.name}: ERROR — ${e.message}`);
+      if (e.botChallenge) {
+        blocked = true;
+        logFn(`  ${cat.name}: blocked by bot challenge — not retrying`);
+        break;
+      }
+    }
+    if (result.count > 0) break;
+    if (attempt < RETRY_MAX) logFn(`  ${cat.name}: 0 cards (attempt ${attempts})`);
+  }
+  logFn(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
+  return { result, attempts, blocked };
+}
+
+// ── Digest collection ───────────────────────────────────────────────
+function collectDigest({
+  openTab = openDiscoverTab,
+  fetchFeed = fetchFeedItems,
+  scrape = scrapeWithRetries,
+  logFn = log,
+} = {}) {
+  // API first: one call carries exact publish times and needs no rendering.
+  let feedItems = [];
+  let blocked = false;
+  try {
+    openTab();
+    feedItems = fetchFeed({ logFn });
+    logFn(`API: ${feedItems.length} feed item(s) with publish times`);
+  } catch (e) {
+    if (e.botChallenge) blocked = true;
+    logFn(`API unavailable (${e.message}); relying on UI scraping`);
+  }
+  // Index the first dated card for each nonempty normalized headline.
+  const apiCards = feedItems.map(apiCard);
+  const apiByTitle = new Map();
+  for (const card of apiCards) {
+    const key = card ? normalizeTitle(card.headline) : "";
+    if (key && card.published && !apiByTitle.has(key)) apiByTitle.set(key, card);
+  }
+
+  const topCards = selectTopApiCards(apiCards);
+  const allData = {};
+  for (const cat of CATEGORIES) {
+    let result;
+    let servedByApi = false;
+
+    // The API exposes one general feed, so it can serve the Top section outright;
+    // the per-category feeds only exist in the UI.
+    if (cat.id === "top" && topCards.length > 0) {
+      result = { count: topCards.length, cards: topCards };
+      servedByApi = true;
+      logFn(`  ${cat.name}: ${topCards.length} cards (API)`);
+    } else {
+      const scraped = scrape(cat, { logFn });
+      result = scraped.result;
+      if (scraped.blocked) blocked = true;
+    }
+
+    // Fill publish times the UI does not render, using the API's timestamps.
+    // API cards already carry one, so only scraped categories need this.
+    if (!servedByApi && feedItems.length > 0) {
+      let filled = 0;
+      for (const card of result.cards) {
+        const key = normalizeTitle(card.headline);
+        if (card.published) continue;
+        const hit = apiByTitle.get(key);
+        if (hit) {
+          card.published = hit.published;
+          filled++;
+        }
+      }
+      if (filled > 0) logFn(`  ${cat.name}: +${filled} publish time(s) from API`);
+    }
+
+    allData[cat.id] = result;
+  }
+
+  return { allData, blocked };
+}
+
+function openDigest(outPath, { exec = execFileSync, logFn = log } = {}) {
+  try {
+    exec("xdg-open", [outPath], { stdio: "ignore" });
+    logFn("Opened in browser");
+  } catch (e) {
+    logFn(`Warning: could not open the digest (${e.message})`);
+  }
 }
 
 // ── Main ────────────────────────────────────────────────────────────
@@ -560,72 +875,14 @@ async function main() {
   log(`Output dir: ${opts.out}`);
   log(`Cards per category: ${opts.limit}`);
 
-  // Ensure Chrome is running with remote debugging
-  ensureChrome();
-
-  // API first: one call carries exact publish times and needs no rendering.
-  let feedItems = [];
-  try {
-    feedItems = await fetchFeedItems();
-    log(`API: ${feedItems.length} feed item(s) with publish times`);
-  } catch (e) {
-    log(`API unavailable (${e.message}); relying on UI scraping`);
-  }
-  const apiByTitle = new Map();
-  for (const item of feedItems) apiByTitle.set(normalizeTitle(item.title), apiCard(item));
-
-  const RETRY_DELAY_MS = 5000;
-  const RETRY_MAX = 2;
-  const allData = {};
-  for (const cat of CATEGORIES) {
-    let result = { count: 0, cards: [] };
-    let attempts = 0;
-
-    // The API exposes one general feed, so it can serve the Top section outright;
-    // the per-category feeds only exist in the UI.
-    if (cat.id === "top" && feedItems.length > 0) {
-      result = { count: feedItems.length, cards: feedItems.map(apiCard) };
-      log(`  ${cat.name}: ${result.count} cards (API)`);
-    } else {
-    for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
-      if (attempt > 0) {
-        log(`  ${cat.name}: retry ${attempt}/${RETRY_MAX} after ${RETRY_DELAY_MS / 1000}s...`);
-        execSync(`sleep ${RETRY_DELAY_MS / 1000}`);
-      }
-      attempts++;
-      try {
-        result = scrapeCategory(cat);
-      } catch (e) {
-        log(`  ${cat.name}: ERROR — ${e.message}`);
-      }
-      if (result.count > 0) break;
-      if (attempt < RETRY_MAX) log(`  ${cat.name}: 0 cards (attempt ${attempts})`);
-    }
-    log(`  ${cat.name}: ${result.count} cards (${attempts} attempt${attempts > 1 ? "s" : ""})`);
-    }
-
-    // Fill publish times the UI does not render, using the API's timestamps.
-    if (feedItems.length > 0) {
-      let filled = 0;
-      for (const card of result.cards) {
-        if (card.published) continue;
-        const hit = apiByTitle.get(normalizeTitle(card.headline));
-        if (hit && hit.published) {
-          card.published = hit.published;
-          filled++;
-        }
-      }
-      if (filled > 0) log(`  ${cat.name}: +${filled} publish time(s) from API`);
-    }
-
-    allData[cat.id] = result;
-  }
+  await ensureChrome();
+  const { allData, blocked } = collectDigest();
 
   const totalCards = CATEGORIES.reduce((sum, c) => sum + (allData[c.id]?.count || 0), 0);
   log(`Total: ${totalCards} cards across ${CATEGORIES.length} categories`);
 
   if (totalCards === 0) {
-    log("ERROR: No cards scraped. Check Chrome and Perplexity availability.");
+    log(noCardsMessage(blocked));
     process.exit(1);
   }
 
@@ -639,8 +896,7 @@ async function main() {
   log(`✅ Saved: ${outPath} (${kb} KB)`);
 
   if (opts.open) {
-    try { execSync(`xdg-open "${outPath}" >/dev/null 2>&1`); } catch {}
-    log("Opened in browser");
+    openDigest(outPath);
   }
 }
 
@@ -652,6 +908,28 @@ if (require.main === module) {
 }
 
 module.exports = {
+  parseArgs,
+  clearStaleLocks,
   waitForHydratedCards,
   parseCardFromLeaves,
+  // Pure helpers, exported so the node --test suite can cover their edge cases
+  // (missing/invalid timestamps, clock skew, unit rounding, empty headlines).
+  relativeTime,
+  normalizeTitle,
+  apiCard,
+  selectTopApiCards,
+  safeUrl,
+  cardHtml,
+  isChallengeTitle,
+  apiGet,
+  openDiscoverTab,
+  fetchFeedItems,
+  scrapeWithRetries,
+  noCardsMessage,
+  collectDigest,
+  openDigest,
+  cdpPort,
+  headlessWarning,
+  chromeCommand,
+  prepareChromeLaunch,
 };

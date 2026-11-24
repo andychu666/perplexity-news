@@ -88,6 +88,29 @@ test("waitForHydratedCards stops before sleeping past the deadline", () => {
   assert.match(harness.logs[0], /Business: no cards after 0.45s hydration wait/);
 });
 
+test("waitForHydratedCards sleeps with a blocking Atomics.wait by default", (t) => {
+  // A 0 ms timeout runs the real call's checks without the wait: "timed-out"
+  // means it would block for `ms`, "not-equal" that it returns at once.
+  const realWait = Atomics.wait;
+  const slept = [];
+  t.mock.method(Atomics, "wait", (array, index, value, ms) => {
+    const outcome = realWait(array, index, value, 0);
+    if (outcome === "timed-out") slept.push(ms);
+    return outcome;
+  });
+
+  const result = waitForHydratedCards({
+    categoryName: "Tech",
+    evaluateCount: () => "3",
+    now: () => 0,
+    logFn: () => assert.fail("logged"),
+    initialWaitMs: 100,
+  });
+
+  assert.deepEqual(result, { cardCount: 3, pollErrors: 0 });
+  assert.deepEqual(slept, [100]);
+});
+
 test("waitForHydratedCards records eval failures and continues polling", () => {
   const harness = makeHarness({ counts: [0, 4], throwOn: [1] });
 
