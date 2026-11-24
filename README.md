@@ -112,7 +112,6 @@ perplexity-news/
 │   ├── fake-browser.test.js        # Browser-facing code with fake subprocesses
 │   ├── html.test.js                # Digest card rendering and escaping
 │   ├── hydration-poll.test.js      # Card hydration polling
-│   ├── parse-args.test.js          # Argument parsing in process
 │   ├── seams.test.js               # Digest collection and launch helpers
 │   └── mutants/
 │       └── run-mutants             # Mutation test runner
