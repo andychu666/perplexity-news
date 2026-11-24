@@ -111,6 +111,13 @@ test("a headline after the source count is still found", () => {
   assert.equal(card.sources, "12");
 });
 
+test("a Published leaf before the headline is still read", () => {
+  const card = parseCardFromLeaves(["Published", "2 hours ago", "Headline that follows the publish time", "3 sources"]);
+  assert.equal(card.published, "2 hours ago");
+  assert.equal(card.headline, "Headline that follows the publish time");
+  assert.equal(card.sources, "3");
+});
+
 test("a publish time in the last leaf is captured", () => {
   const card = parseCardFromLeaves(["Some headline that is long enough", "Published", "2 hours ago"]);
   assert.equal(card.headline, "Some headline that is long enough");
