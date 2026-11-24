@@ -8,10 +8,18 @@ const { parseArgs } = require("../scripts/daily-news.js");
 
 const script = path.join(__dirname, "../scripts/daily-news.js");
 
-test("parseArgs accepts filename-safe suffixes", () => {
-  for (const suffix of ["morning", "night", "a-b_1"]) {
+// process.exit is mocked, so a wrongly rejected suffix fails this test by
+// name instead of ending the test file's process.
+test("parseArgs keeps filename-safe suffixes and exits 1 on an unsafe one, in process", (t) => {
+  t.mock.method(console, "error", () => {});
+  t.mock.method(process, "exit", (code) => {
+    throw new Error(`process.exit(${code})`);
+  });
+
+  for (const suffix of ["morning", "night", "a-b_1", "Morning"]) {
     assert.equal(parseArgs(["--suffix", suffix]).suffix, suffix);
   }
+  assert.throws(() => parseArgs(["--suffix", "a/b"]), { message: "process.exit(1)" });
 });
 
 test("the CLI rejects invalid suffixes before starting Chrome", (t) => {

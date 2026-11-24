@@ -39,7 +39,8 @@ test("a dead local PID clears all three Singleton symlinks", (t) => {
   });
 
   assert.deepEqual(singletonEntries(dir), []);
-  assert.deepEqual(logs.sort(), entries.map((entry) => `Removed stale ${entry}`));
+  // Socket first, lock last.
+  assert.deepEqual(logs, ["Removed stale SingletonSocket", "Removed stale SingletonCookie", "Removed stale SingletonLock"]);
   assert.ok(fs.existsSync(socketTarget));
 });
 
@@ -59,22 +60,6 @@ test("a different host keeps all three Singleton symlinks", (t) => {
 
   assert.deepEqual(singletonEntries(dir), entries);
   assert.match(logs.join("\n"), /other-host/);
-});
-
-test("a malformed lock keeps all three Singleton symlinks", (t) => {
-  const { dir } = makeProfile(t, `${hostname}-not-a-pid`);
-  const logs = [];
-  clearStaleLocks(dir, { hostname, isAlive: () => assert.fail("probed a malformed PID"), logFn: (message) => logs.push(message) });
-
-  assert.deepEqual(singletonEntries(dir), entries);
-  assert.match(logs.join("\n"), /malformed/);
-});
-
-test("a profile without SingletonLock keeps the remaining symlinks", (t) => {
-  const { dir } = makeProfile(t);
-  clearStaleLocks(dir, { hostname, isAlive: () => assert.fail("probed a missing PID"), logFn: () => {} });
-
-  assert.deepEqual(singletonEntries(dir), ["SingletonCookie", "SingletonSocket"]);
 });
 
 test("a lock replaced during the PID check keeps the new owner's symlinks", (t) => {
@@ -116,10 +101,11 @@ test("a missing SingletonLock is skipped without a log line", (t) => {
   const { logs, logFn } = recordLogs();
   clearStaleLocks(dir, { hostname, isAlive: () => assert.fail("probed a missing PID"), logFn });
 
+  assert.deepEqual(singletonEntries(dir), ["SingletonCookie", "SingletonSocket"]);
   assert.deepEqual(logs, []);
 });
 
-for (const target of ["-12345", "12345", `${hostname}-0`, `${hostname}-+12345`, `${hostname}-12345x`, `${hostname}-2147483648`]) {
+for (const target of ["-12345", "12345", `${hostname}-0`, `${hostname}-+12345`, `${hostname}-12345x`, `${hostname}-2147483648`, `${hostname}-not-a-pid`]) {
   test(`lock target ${JSON.stringify(target)} is malformed and kept without a PID probe`, (t) => {
     const { dir } = makeProfile(t, target);
     const { logs, logFn } = recordLogs();
@@ -187,14 +173,6 @@ test("a lock that stops being a symlink during the PID check is kept and reporte
   assert.deepEqual(singletonEntries(dir), entries);
   assert.equal(logs.length, 1);
   assert.match(logs[0], /^Keeping SingletonLock: cannot recheck symlink — /);
-});
-
-test("stale symlinks are removed socket first and lock last", (t) => {
-  const { dir } = makeProfile(t, `${hostname}-${pid}`);
-  const { logs, logFn } = recordLogs();
-  clearStaleLocks(dir, { hostname, isAlive: () => false, logFn });
-
-  assert.deepEqual(logs, ["Removed stale SingletonSocket", "Removed stale SingletonCookie", "Removed stale SingletonLock"]);
 });
 
 test("an already missing Singleton entry is skipped without a warning", (t) => {

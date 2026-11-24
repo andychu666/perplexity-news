@@ -217,6 +217,15 @@ test("ordinary errors and empty pages still retry the full count", () => {
   assert.equal(out.attempts, 3);
   assert.equal(out.blocked, false);
   assert.deepEqual(h.sleeps, [5000, 5000]);
+  // Each empty attempt, each retry and the total are logged.
+  assert.deepEqual(h.logs, [
+    "  Tech: ERROR — timeout",
+    "  Tech: 0 cards (attempt 1)",
+    "  Tech: retry 1/2 after 5s...",
+    "  Tech: 0 cards (attempt 2)",
+    "  Tech: retry 2/2 after 5s...",
+    "  Tech: 0 cards (3 attempts)",
+  ]);
 });
 
 test("cards on the first attempt return without retrying", () => {
@@ -226,19 +235,6 @@ test("cards on the first attempt return without retrying", () => {
   assert.equal(h.calls, 1);
   assert.equal(out.blocked, false);
   assert.deepEqual(out.result, cards);
-});
-
-test("retry logs name each empty attempt, each retry and the total", () => {
-  const h = harness([new Error("timeout"), empty, empty]);
-  scrapeWithRetries(cat, h.opts);
-  assert.deepEqual(h.logs, [
-    "  Tech: ERROR — timeout",
-    "  Tech: 0 cards (attempt 1)",
-    "  Tech: retry 1/2 after 5s...",
-    "  Tech: 0 cards (attempt 2)",
-    "  Tech: retry 2/2 after 5s...",
-    "  Tech: 0 cards (3 attempts)",
-  ]);
 });
 
 test("the attempt total is singular for one attempt and plural for two", () => {
