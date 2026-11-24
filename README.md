@@ -49,7 +49,7 @@ node scripts/daily-news.js --open
 > The script never solves or evades the challenge: no user-agent spoofing, no stealth flags. It only runs a normal browser. If Cloudflare gets stricter later, runs can be blocked again (#27).
 - **pi browser-tools** at `~/.pi/agent/skills/pi-skills/browser-tools/` — the script uses `browser-nav.js` and `browser-eval.js` from this skill. This is the only setup dependency; no separate `puppeteer-core` install needed.
 
-To start the browser (optional — the script auto-starts headless if port 9222 is free):
+If no Chrome is listening on port `9222`, the script starts headed Chrome under `xvfb-run`. It falls back to headless Chrome when `xvfb-run` is unavailable. You can also start Chrome yourself.
 
 ```bash
 ~/.pi/agent/skills/pi-skills/browser-tools/browser-start.js --profile
@@ -104,9 +104,18 @@ perplexity-news/
 ├── scripts/
 │   └── daily-news.js              # Main scraper + HTML generator
 ├── test/
-│   ├── hydration-poll.test.js     # Unit tests for hydration polling
-│   ├── card-parse.test.js         # Unit tests for card metadata extraction
-│   └── bot-challenge.test.js      # Unit tests for Cloudflare challenge handling + API paging
+│   ├── api-helpers.test.js         # Feed card mapping and relative timestamps
+│   ├── bot-challenge.test.js       # Challenge handling, API paging, and retries
+│   ├── card-parse.test.js          # Card metadata extraction
+│   ├── chrome-locks.test.js        # Chrome profile lock cleanup
+│   ├── cli.test.js                 # CLI validation before browser startup
+│   ├── fake-browser.test.js        # Browser-facing code with fake subprocesses
+│   ├── html.test.js                # Digest card rendering and escaping
+│   ├── hydration-poll.test.js      # Card hydration polling
+│   ├── parse-args.test.js          # Argument parsing in process
+│   ├── seams.test.js               # Digest collection and launch helpers
+│   └── mutants/
+│       └── run-mutants             # Mutation test runner
 ├── follow-ups/                    # Code review follow-up notes
 ├── package.json                   # npm test entrypoint
 ├── README.md                      # This file
