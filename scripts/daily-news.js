@@ -52,10 +52,16 @@ function parseArgs(argv) {
       case "--open":
         opts.open = true;
         break;
-      case "--suffix":
-        if (i + 1 >= argv.length) { console.error("ERROR: --suffix requires a string"); process.exit(1); }
-        opts.suffix = argv[++i];
+      case "--suffix": {
+        // The suffix becomes part of the output filename.
+        const suffix = argv[++i] ?? "";
+        if (!suffix || /[^A-Za-z0-9_-]/.test(suffix)) {
+          console.error(`ERROR: --suffix may only contain letters, digits, - and _ (got ${JSON.stringify(suffix)})`);
+          process.exit(1);
+        }
+        opts.suffix = suffix;
         break;
+      }
       default:
         console.error("Unknown flag:", argv[i]);
         process.exit(1);
@@ -753,12 +759,6 @@ async function main() {
   }
 
   const html = buildHtml(allData, opts.limit);
-  // The suffix becomes part of a filename: reject anything that could traverse
-  // out of --out (e.g. ../../).
-  if (opts.suffix && !/^[A-Za-z0-9_-]+$/.test(opts.suffix)) {
-    log(`ERROR: --suffix may only contain letters, digits, - and _ (got "${opts.suffix}")`);
-    process.exit(2);
-  }
   const suffixPart = opts.suffix ? `-${opts.suffix}` : "";
   const outPath = path.join(opts.out, `perplexity-news-${today}${suffixPart}.html`);
   fs.mkdirSync(opts.out, { recursive: true });
@@ -785,6 +785,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  parseArgs,
   waitForHydratedCards,
   parseCardFromLeaves,
   // Pure helpers, exported so the node --test suite can cover their edge cases
