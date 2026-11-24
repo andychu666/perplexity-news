@@ -1,9 +1,27 @@
 #!/usr/bin/env node
 "use strict";
-// Mutation runner for the guards that PR #29 adds or changes in
-// scripts/daily-news.js (`git diff origin/main...HEAD`), for every guard in
-// the functions the PR adds, and for the review items that point at lines
-// main already had (each such group says so).
+// Mutation runner for scripts/daily-news.js in PR #29. Its scope is
+//   1. every line of the functions the PR adds: isChallengeTitle,
+//      botChallengeError, noCardsMessage, pageTitle, openDiscoverTab,
+//      browserEval, selectTopApiCards, safeUrl, isProcessAlive,
+//      clearStaleLocks, cdpPort, headlessWarning, chromeCommand,
+//      prepareChromeLaunch, scrapeWithRetries, collectDigest, openDigest;
+//   2. every other line that `git diff origin/main...HEAD` (merge base
+//      e2296dc) marks added;
+//   3. the main lines that a group comment names, each with its reason.
+// On those lines the list holds each mutant of the blocking set below,
+// except those that a group comment leaves out, each with its reason.
+// Strings other than numbers (paths, flags, messages) are data, not guards.
+//
+// Blocking set: each condition negated / True / False (guard deleted);
+// each comparison, constant, threshold, slice bound or index ±1, and
+// `<`↔`<=`; each catch emptied (rethrows) and each `e.code` check narrowed;
+// each loop cut to its first element, made to exit early, and reversed when
+// order matters; each `||`/`&&` chain swapped; each fallback, default,
+// redirect or reset removed (a boolean reset is flipped, a number ±1); each
+// regex forced to always / never match, with its `^`/`$` anchors and each
+// class member dropped. Some groups add mutants outside the set, such as a
+// deleted listener or call; their labels say what they change.
 //
 //   node test/mutants/run-mutants             # every mutant
 //   node test/mutants/run-mutants apiGet      # one function's mutants only
@@ -23,7 +41,7 @@ const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const PINNED = "97501865fe16113e2d355478ce73bf03e791bbe6";
+const PINNED = "0e84c109a13a45c5bbd7bae61dbe2a49ab04f593";
 const ROOT = path.resolve(__dirname, "..", "..");
 const REL = "scripts/daily-news.js";
 const TARGET = path.join(ROOT, REL);
@@ -90,10 +108,28 @@ add(58, "class member `-` dropped", "/[^A-Za-z0-9_-]/", "/[^A-Za-z0-9_]/");
 add(60, "exit code 1 → 0", "process.exit(1)", "process.exit(0)");
 add(60, "exit code 1 → 2", "process.exit(1)", "process.exit(2)");
 
-// These lines changed only from var to let/const; the guards are as on main.
+// Reached through waitForHydratedCards' default `sleep`, under an
+// Atomics.wait that runs the real argument checks with a 0 ms timeout
+// (test/hydration-poll.test.js).
+group("sleepSync");
+add(80, "buffer size 4 → 3", "SharedArrayBuffer(4)", "SharedArrayBuffer(3)");
+add(80, "buffer size 4 → 5", "SharedArrayBuffer(4)", "SharedArrayBuffer(5)");
+add(80, "index 0 → 1", "(4)), 0,", "(4)), 1,");
+add(80, "index 0 → −1", "(4)), 0,", "(4)), -1,");
+add(80, "expected value 0 → 1", ", 0, ms)", ", 1, ms)");
+add(80, "expected value 0 → −1", ", 0, ms)", ", -1, ms)");
+
+// These lines changed only from var to let/const; their guards (loop bounds,
+// regex, resets, the candidate index) are as on main. The function's other
+// lines are main's and not listed.
 group("parseCardFromLeaves");
 const trailingPublished = 'a trailing Published leaf has no candidate: .test(undefined) tests "undefined", which matches neither date pattern, so published stays null';
 const pastLastLeaf = 'leafTexts[length] is undefined, and `if (!headline)` maps it to the same "" as the original null';
+add(128, "reset removed (`let sources;`)", "let sources = null;", "let sources;");
+add(129, "constant −1 → 0", "let sourcesIdx = -1;", "let sourcesIdx = 0;");
+add(129, "constant −1 → −2", "let sourcesIdx = -1;", "let sourcesIdx = -2;", eq("sourcesIdx is only compared with the headline loop's index (L149), which starts at 0"));
+add(130, "start 0 → 1", "let i = 0;", "let i = 1;");
+add(130, "start 0 → −1", "let i = 0;", "let i = -1;");
 add(130, "`<` → `<=`", "i < leafTexts.length;", "i <= leafTexts.length;");
 add(130, "bound − 1", "i < leafTexts.length;", "i < leafTexts.length - 1;");
 add(130, "bound + 1", "i < leafTexts.length;", "i < leafTexts.length + 1;");
@@ -104,12 +140,20 @@ add(131, "regex forced to always match", String.raw`/^(\d+)\s*sources?$/i`, "/(.
 add(131, "regex forced to never match", String.raw`/^(\d+)\s*sources?$/i`, "/(?!)/");
 add(131, "`^` anchor dropped", String.raw`/^(\d+)\s*sources?$/i`, String.raw`/(\d+)\s*sources?$/i`);
 add(131, "`$` anchor dropped", String.raw`/^(\d+)\s*sources?$/i`, String.raw`/^(\d+)\s*sources?/i`);
+add(135, "reset removed (`let published;`)", "let published = null;", "let published;");
+add(136, "start 0 → 1", "let i = 0;", "let i = 1;");
+add(136, "start 0 → −1", "let i = 0;", "let i = -1;", eq('leafTexts[-1] is undefined: .test(undefined) tests "undefined", which /^Published$/i does not match, so the extra first pass changes nothing'));
 add(136, "`<` → `<=`", "i < leafTexts.length - 1;", "i <= leafTexts.length - 1;", eq(trailingPublished));
 add(136, "bound − 1", "i < leafTexts.length - 1;", "i < leafTexts.length - 2;");
 add(136, "bound + 1", "i < leafTexts.length - 1;", "i < leafTexts.length;", eq(trailingPublished));
 add(136, "loop cut to its first element", "i < leafTexts.length - 1;", "i < Math.min(1, leafTexts.length - 1);");
 add(136, "loop exits early", "i++) {", "i++) { break;");
 add(136, "loop reversed", "let i = 0; i < leafTexts.length - 1; i++", "let i = leafTexts.length - 2; i >= 0; i--");
+add(138, "index i + 1 → i", "leafTexts[i + 1]", "leafTexts[i]");
+add(138, "index i + 1 → i + 2", "leafTexts[i + 1]", "leafTexts[i + 2]");
+add(147, "reset removed (`let headline;`)", "let headline = null;", "let headline;", eq('the loop never reads headline, and after it `if (!headline)` maps undefined to the same "" as null'));
+add(148, "start 0 → 1", "let i = 0;", "let i = 1;");
+add(148, "start 0 → −1", "let i = 0;", "let i = -1;");
 add(148, "`<` → `<=`", "i < leafTexts.length;", "i <= leafTexts.length;", eq(pastLastLeaf));
 add(148, "bound − 1", "i < leafTexts.length;", "i < leafTexts.length - 1;");
 add(148, "bound + 1", "i < leafTexts.length;", "i < leafTexts.length + 1;", eq(pastLastLeaf));
@@ -152,6 +196,8 @@ add(238, "extractJS: syntax error", "cards: cards });", "cards: cards };");
 add(239, "extractJS: function not called", "})()`;", "})`;");
 cond(251, "match", { True: eq("with no match, match[1] throws inside the inner try, and its catch leaves result undefined, which the shape check turns into the same empty result") });
 add(252, "catch emptied (rethrows)", "catch { /* truncated output */ }", "catch (e) { throw e; }");
+add(252, "match index 1 → 0", "JSON.parse(match[1])", "JSON.parse(match[0])", eq("the capture group spans the whole regex, so match[0] and match[1] are the same text"));
+add(252, "match index 1 → 2", "JSON.parse(match[1])", "JSON.parse(match[2])");
 const shapeOk = "Number.isInteger(result?.count) && result.count >= 0 && Array.isArray(result.cards)";
 add(255, "shape check negated", `return ${shapeOk}`, `return !(${shapeOk})`);
 add(255, "shape check True", `return ${shapeOk}`, "return true");
@@ -165,6 +211,8 @@ add(255, "`>=` → `>`", "result.count >= 0", "result.count > 0");
 add(255, "constant 0 → 1", "result.count >= 0", "result.count >= 1");
 add(255, "constant 0 → −1", "result.count >= 0", "result.count >= -1");
 add(255, "optional chaining `?.` removed", "result?.count", "result.count");
+add(256, "empty result count 0 → 1", "{ count: 0, cards: [] }", "{ count: 1, cards: [] }");
+add(256, "empty result count 0 → −1", "{ count: 0, cards: [] }", "{ count: -1, cards: [] }");
 
 // The line is as on main; the review (T-n10) asked for its default.
 group("CDP_URL");
@@ -206,8 +254,9 @@ add(298, "optional chaining `?.` removed", "lastError?.message", "lastError.mess
 add(298, "`??` fallback removed", " ?? String(lastError)", "");
 cond(300, "challengeTitle");
 
-// The 64 MiB cap is not a guard; its removal is checked because a feed page
-// outgrows Node's 1 MiB default.
+// Only the 64 MiB cap's removal is listed, because a feed page outgrows
+// Node's 1 MiB default. Its factors (64, 1024, 1024) are left out: ±1 moves
+// the cap by at most 1 MiB, far above the test's 1.6 MB feed page.
 group("browserEval");
 add(310, "maxBuffer option removed (1 MiB default)", ", maxBuffer: 64 * 1024 * 1024", "");
 
@@ -282,9 +331,14 @@ add(356, "loop cut to its first element", "cards.filter(", "cards.slice(0, 1).fi
 add(356, "loop exits early", "cards.filter(", "[].filter(");
 add(356, "loop reversed", "cards.filter(", "cards.slice().reverse().filter(");
 
+// FEED_VERSION (L268) is read only here. The loop header (L361) is as on
+// main; it stays listed because the try/catch the PR adds in the loop reads
+// `i` (`i === 0`, `i + 1`).
 group("fetchFeedItems");
 const shape = "body && Array.isArray(body.items)";
 const isEntry = 'entry && typeof entry === "object"';
+add(268, 'constant "2.18" → "2.17"', 'FEED_VERSION = "2.18"', 'FEED_VERSION = "2.17"');
+add(268, 'constant "2.18" → "2.19"', 'FEED_VERSION = "2.18"', 'FEED_VERSION = "2.19"');
 add(359, "default `pages = 2` removed", "pages = 2", "pages");
 add(359, "default 2 → 1", "pages = 2", "pages = 1");
 add(359, "default 2 → 3", "pages = 2", "pages = 3");
@@ -308,6 +362,8 @@ add(368, "condition False (guard deleted)", "if (i === 0)", "if (false)");
 add(368, "constant 0 → 1", "i === 0", "i === 1");
 add(368, "constant 0 → −1", "i === 0", "i === -1");
 add(369, "injected logger bypassed (`log(`)", "logFn(`API page", "log(`API page");
+add(369, "logged page number i + 1 → i", "${i + 1}", "${i + 0}");
+add(369, "logged page number i + 1 → i + 2", "${i + 1}", "${i + 2}");
 add(372, "condition negated", `${shape} ?`, `!(${shape}) ?`);
 add(372, "condition True (guard deleted)", `${shape} ?`, "true ?");
 add(372, "condition False", `${shape} ?`, "false ?");
@@ -359,7 +415,8 @@ ternary(412, 'String(card.sources) === "1"');
 add(412, 'constant "1" → "0"', '=== "1"', '=== "0"');
 add(412, 'constant "1" → "2"', '=== "1"', '=== "2"');
 
-// Reached through clearStaleLocks' default `isAlive`.
+// Reached through clearStaleLocks' default `isAlive`. The signal 0 in
+// `process.kill(pid, 0)` is left out: 0 → 1 would send SIGHUP to a live PID.
 group("isProcessAlive");
 add(577, "result True → False", "return true;", "return false;");
 add(580, "catch emptied (rethrows)", 'return e.code !== "ESRCH";', "throw e;");
@@ -376,6 +433,12 @@ add(584, "default `logFn = log` removed", "logFn = log", "logFn");
 add(584, "default `= {}` removed", "} = {})", "})");
 enoentCatch(590);
 add(594, "scan reversed (`indexOf`)", 'lastIndexOf("-")', 'indexOf("-")');
+add(595, "host slice start 0 → 1", "target.slice(0, separator)", "target.slice(1, separator)");
+add(595, "host slice start 0 → −1", "target.slice(0, separator)", "target.slice(-1, separator)");
+add(595, "host slice end − 1", "target.slice(0, separator)", "target.slice(0, separator - 1)");
+add(595, "host slice end + 1", "target.slice(0, separator)", "target.slice(0, separator + 1)");
+add(596, "PID slice start − 1", "target.slice(separator + 1)", "target.slice(separator)");
+add(596, "PID slice start + 1", "target.slice(separator + 1)", "target.slice(separator + 2)");
 cond(598, malformed);
 add(598, "`separator` operand deleted", "separator <= 0 || ", "");
 add(598, "regex operand deleted", "!/^[0-9]+$/.test(pidText) || ", "");
@@ -443,6 +506,7 @@ add(688, "first-match `break` deleted", "break;", "");
 add(689, "catch emptied (rethrows)", "} catch {", "} catch (e) { throw e;");
 cond(691, "!chromeBin");
 add(696, "`??` fallback removed", ' ?? path.join(os.homedir(), ".cache", "browser-tools")', "");
+add(697, "mkdir recursive true → false", "{ recursive: true }", "{ recursive: false }");
 add(698, "stale-lock guard call deleted", "clearLocks(userDataDir, { logFn });", "");
 add(698, "logger not forwarded (`{ logFn }` removed)", "clearLocks(userDataDir, { logFn })", "clearLocks(userDataDir)");
 add(704, "reset true → false", "let hasXvfb = true;", "let hasXvfb = false;");
@@ -497,6 +561,11 @@ add(767, "default `sleep = sleepSync` removed", "sleep = sleepSync", "sleep");
 add(767, "default `logFn = log` removed", "logFn = log", "logFn");
 add(767, "default `= {}` removed", "} = {})", "})");
 add(768, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;");
+add(768, "empty result count 0 → 1", "{ count: 0, cards: [] }", "{ count: 1, cards: [] }");
+add(768, "empty result count 0 → −1", "{ count: 0, cards: [] }", "{ count: -1, cards: [] }");
+add(769, "constant 0 → 1", "let attempts = 0;", "let attempts = 1;");
+add(769, "constant 0 → −1", "let attempts = 0;", "let attempts = -1;");
+add(770, "reset false → true", "let blocked = false;", "let blocked = true;");
 add(771, "`<=` → `<`", "attempt <= RETRY_MAX;", "attempt < RETRY_MAX;");
 add(771, "bound − 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX - 1;");
 add(771, "bound + 1", "attempt <= RETRY_MAX;", "attempt <= RETRY_MAX + 1;");
@@ -509,6 +578,8 @@ cond(772, "attempt > 0");
 add(772, "`>` → `>=`", "attempt > 0", "attempt >= 0");
 add(772, "constant 0 → 1", "attempt > 0", "attempt > 1");
 add(772, "constant 0 → −1", "attempt > 0", "attempt > -1");
+add(773, "logged delay divisor 1000 → 999", "RETRY_DELAY_MS / 1000", "RETRY_DELAY_MS / 999");
+add(773, "logged delay divisor 1000 → 1001", "RETRY_DELAY_MS / 1000", "RETRY_DELAY_MS / 1001");
 add(779, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
 cond(781, "e.botChallenge");
 add(782, "flag true → false", "blocked = true;", "blocked = false;");
@@ -535,8 +606,12 @@ add(800, "default `= {}` removed", "} = {}) {", "}) {");
 add(802, "reset removed (`let feedItems;`)", "let feedItems = [];", "let feedItems;");
 add(803, "reset false → true", "let blocked = false;", "let blocked = true;");
 add(806, "logger not forwarded (`fetchFeed()`)", "fetchFeed({ logFn })", "fetchFeed()");
+add(808, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
 cond(809, "e.botChallenge");
 add(809, "flag true → false", "blocked = true;", "blocked = false;");
+add(813, "loop cut to its first element", "feedItems.map(", "feedItems.slice(0, 1).map(");
+add(813, "loop exits early", "feedItems.map(", "[].map(");
+add(813, "loop reversed", "feedItems.map(", "feedItems.slice().reverse().map(");
 add(815, "loop cut to its first element", "of apiCards)", "of apiCards.slice(0, 1))");
 add(815, "loop exits early", "of apiCards) {", "of apiCards) { break;");
 add(815, "loop reversed", "of apiCards)", "of apiCards.slice().reverse())");
@@ -552,7 +627,11 @@ add(820, "guard call deleted", "selectTopApiCards(apiCards)", "apiCards");
 add(822, "loop cut to its first element", "of CATEGORIES)", "of CATEGORIES.slice(0, 1))");
 add(822, "loop exits early", "of CATEGORIES) {", "of CATEGORIES) { break;");
 add(822, "loop reversed", "of CATEGORIES)", "of CATEGORIES.slice().reverse())");
-add(823, "reset removed (`let result;`)", "let result = { count: 0, cards: [] };", "let result;", eq("both branches below assign result before anything reads it"));
+// 9e456fc (refactor: remove redundant digest checks) removed the code of
+// four mutants listed at d8b0072, so they are dropped: L823 "reset removed
+// (`let result;`)" (the line is now `let result;`), and at L846, where
+// `hit && hit.published` is now `hit`, "`hit` operand deleted", "`published`
+// operand deleted" and "all → any (`&&` → `||`)".
 add(824, "reset false → true", "let servedByApi = false;", "let servedByApi = true;");
 cond(828, 'cat.id === "top" && topCards.length > 0');
 add(828, "`cat.id` operand deleted", 'cat.id === "top" && ', "");
@@ -582,10 +661,7 @@ add(842, "loop cut to its first element", "of result.cards)", "of result.cards.s
 add(842, "loop exits early", "of result.cards) {", "of result.cards) { break;");
 // Not reversed: each card is filled on its own, so order does not matter.
 cond(844, "card.published");
-cond(846, "hit && hit.published");
-add(846, "`hit` operand deleted", "hit && hit.published", "hit.published");
-add(846, "`published` operand deleted", " && hit.published", "", eq("apiByTitle holds only cards with a publish time (L817), so every hit has one"));
-add(846, "all → any (`&&` → `||`)", "hit && hit.published", "hit || hit.published");
+cond(846, "hit");
 cond(851, "filled > 0");
 add(851, "`>` → `>=`", "filled > 0", "filled >= 0");
 add(851, "constant 0 → 1", "filled > 0", "filled > 1");
@@ -600,7 +676,12 @@ add(864, "catch emptied (rethrows)", "} catch (e) {", "} catch (e) { throw e;");
 
 // Reached through the CLI in a child process (test/fake-browser.test.js).
 // `if (opts.open)` is as on main; the review (T-N2) asked for its call.
+// L871 and L872 hold main's code, but the diff marks them added.
 group("main");
+add(871, "argv slice start 2 → 1", "process.argv.slice(2)", "process.argv.slice(1)");
+add(871, "argv slice start 2 → 3", "process.argv.slice(2)", "process.argv.slice(3)");
+add(872, "date index 0 → 1", 'split("T")[0]', 'split("T")[1]');
+add(872, "date index 0 → −1", 'split("T")[0]', 'split("T")[-1]');
 add(878, "`await` removed (the digest runs before Chrome is ready)", "await ensureChrome();", "ensureChrome();");
 add(885, "blocked flag negated", "noCardsMessage(blocked)", "noCardsMessage(!blocked)");
 add(885, "blocked flag True", "noCardsMessage(blocked)", "noCardsMessage(true)");
