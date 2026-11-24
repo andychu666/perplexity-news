@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
   isChallengeTitle,
@@ -63,6 +64,45 @@ test("apiGet fetches the given path from inside the page", () => {
   assert.match(js, /cf-mitigated/);
 });
 
+for (const status of [199, 300]) {
+  test(`apiGet rejects HTTP ${status}, just outside 2xx`, () => {
+    assert.throws(() => apiGet("/x", fakeFetch(status)), { message: `HTTP ${status}` });
+  });
+}
+
+test("apiGet accepts HTTP 299 as success", () => {
+  assert.deepEqual(apiGet("/x", fakeFetch(299, {}, { items: [] })), { items: [] });
+});
+
+// The in-page script itself, run against a fake fetch() in a VM context.
+function inPageScript(pathname) {
+  let js = "";
+  apiGet(pathname, (code) => { js = code; return fakeFetch(200)(); });
+  return js;
+}
+
+test("the in-page fetch leaves a challenged response's body unread", async () => {
+  let bodyReads = 0;
+  const response = {
+    status: 403,
+    ok: false,
+    headers: { get: (name) => (name === "cf-mitigated" ? "challenge" : null) },
+    json: async () => { bodyReads++; throw new SyntaxError("Unexpected token '<'"); },
+  };
+  const out = await vm.runInNewContext(inPageScript("/rest/discover/feed"), { fetch: async () => response });
+  assert.deepEqual(JSON.parse(out), { status: 403, mitigated: "challenge", body: null });
+  assert.equal(bodyReads, 0);
+});
+
+test("the in-page fetch returns a successful response's JSON body", async () => {
+  const requests = [];
+  const response = { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ items: [1] }) };
+  const fetch = async (url, init) => { requests.push([url, init.headers.accept]); return response; };
+  const out = await vm.runInNewContext(inPageScript("/rest/discover/feed?limit=1"), { fetch });
+  assert.deepEqual(JSON.parse(out), { status: 200, mitigated: null, body: { items: [1] } });
+  assert.deepEqual(requests, [["/rest/discover/feed?limit=1", "application/json"]]);
+});
+
 // ── Feed paging ─────────────────────────────────────────────────────
 
 const page = (n) => ({ items: Array.from({ length: n }, (_, i) => ({ title: `t${i}` })) });
@@ -85,6 +125,29 @@ test("fetchFeedItems stops after a short page and drops non-object entries", () 
   assert.deepEqual(fetchFeedItems({ perPage: 4, get }), [{ title: "a" }]);
   assert.equal(calls, 1);
 });
+
+test("fetchFeedItems reads two full pages of 100 by default, in feed order", () => {
+  const urls = [];
+  const get = (url) => {
+    urls.push(url);
+    const offset = Number(new URL(url, "https://www.perplexity.ai").searchParams.get("offset"));
+    return { items: Array.from({ length: 100 }, (_, i) => ({ n: offset + i })) };
+  };
+  const items = fetchFeedItems({ get });
+  assert.deepEqual(urls, [
+    "/rest/discover/feed?limit=100&offset=0&version=2.18&source=default",
+    "/rest/discover/feed?limit=100&offset=100&version=2.18&source=default",
+  ]);
+  assert.deepEqual(items.map((item) => item.n), Array.from({ length: 200 }, (_, i) => i));
+});
+
+for (const body of [null, {}, { items: "x" }]) {
+  test(`fetchFeedItems reads a ${JSON.stringify(body)} body as an empty last page`, () => {
+    let calls = 0;
+    assert.deepEqual(fetchFeedItems({ get: () => { calls++; return body; } }), []);
+    assert.equal(calls, 1);
+  });
+}
 
 // ── Interstitial detection ──────────────────────────────────────────
 
@@ -161,6 +224,29 @@ test("cards on the first attempt return without retrying", () => {
   assert.equal(h.calls, 1);
   assert.equal(out.blocked, false);
   assert.deepEqual(out.result, cards);
+});
+
+test("retry logs name each empty attempt, each retry and the total", () => {
+  const h = harness([new Error("timeout"), empty, empty]);
+  scrapeWithRetries(cat, h.opts);
+  assert.deepEqual(h.logs, [
+    "  Tech: ERROR — timeout",
+    "  Tech: 0 cards (attempt 1)",
+    "  Tech: retry 1/2 after 5s...",
+    "  Tech: 0 cards (attempt 2)",
+    "  Tech: retry 2/2 after 5s...",
+    "  Tech: 0 cards (3 attempts)",
+  ]);
+});
+
+test("the attempt total is singular for one attempt and plural for two", () => {
+  const found = { count: 2, cards: [{ headline: "a" }, { headline: "b" }] };
+  const one = harness([found]);
+  scrapeWithRetries(cat, one.opts);
+  assert.deepEqual(one.logs, ["  Tech: 2 cards (1 attempt)"]);
+  const two = harness([empty, found]);
+  scrapeWithRetries(cat, two.opts);
+  assert.equal(two.logs.at(-1), "  Tech: 2 cards (2 attempts)");
 });
 
 // ── Final error ─────────────────────────────────────────────────────
